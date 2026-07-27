@@ -1,0 +1,304 @@
+//! Discover Minecraft instances the player might update.
+//!
+//! Two sources are supported automatically — CurseForge app instances (each a
+//! folder with a `minecraftinstance.json`) and official-launcher profiles (from
+//! `.minecraft/launcher_profiles.json`) — plus a manual folder pick in the UI.
+//!
+//! The parsing functions ([`parse_curseforge_instance`], [`parse_launcher_profiles`])
+//! are pure and unit-tested; the `discover_*`/`default_*` helpers wrap them with
+//! best-effort, platform-specific path guesses. Auto-detection is never trusted
+//! blindly: the caller still sanity-checks the chosen instance against the
+//! manifest before binding.
+
+use std::path::{Path, PathBuf};
+
+/// Which launcher an instance belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum LauncherKind {
+    CurseForge,
+    Vanilla,
+    Manual,
+}
+
+/// A discovered instance. `path` is the game directory that contains `mods/`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedInstance {
+    pub name: String,
+    pub path: PathBuf,
+    pub launcher: LauncherKind,
+    pub mc_version: Option<String>,
+    pub loader_type: Option<String>,
+    pub loader_version: Option<String>,
+}
+
+/// Parse a CurseForge `minecraftinstance.json`. `dir` is the instance folder.
+pub fn parse_curseforge_instance(dir: &Path, json: &str) -> Option<DetectedInstance> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let name = v.get("name").and_then(|x| x.as_str())?.to_string();
+    let bml = v.get("baseModLoader");
+    let mc_version = v
+        .get("gameVersion")
+        .and_then(|x| x.as_str())
+        .or_else(|| {
+            bml.and_then(|b| b.get("minecraftVersion"))
+                .and_then(|x| x.as_str())
+        })
+        .map(String::from);
+    let loader_version = bml
+        .and_then(|b| b.get("forgeVersion"))
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    let loader_type = bml
+        .and_then(|b| b.get("name"))
+        .and_then(|x| x.as_str())
+        .map(|n| loader_type_from_name(n).to_string());
+    Some(DetectedInstance {
+        name,
+        path: dir.to_path_buf(),
+        launcher: LauncherKind::CurseForge,
+        mc_version,
+        loader_type,
+        loader_version,
+    })
+}
+
+/// Scan a CurseForge Instances root for instance folders.
+pub fn scan_curseforge_instances(root: &Path) -> Vec<DetectedInstance> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(dir.join("minecraftinstance.json")) {
+            if let Some(inst) = parse_curseforge_instance(&dir, &text) {
+                out.push(inst);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Parse `.minecraft/launcher_profiles.json`. `dotmc` is the `.minecraft` dir,
+/// used as the default game directory for profiles without an explicit `gameDir`.
+pub fn parse_launcher_profiles(json: &str, dotmc: &Path) -> Vec<DetectedInstance> {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let profiles = match v.get("profiles").and_then(|p| p.as_object()) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for (id, prof) in profiles {
+        let last = prof.get("lastVersionId").and_then(|x| x.as_str()).unwrap_or("");
+        let name = prof
+            .get("name")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(if last.is_empty() { id.as_str() } else { last })
+            .to_string();
+        let path = prof
+            .get("gameDir")
+            .and_then(|x| x.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dotmc.to_path_buf());
+        let (loader_type, loader_version) = parse_version_id(last);
+        out.push(DetectedInstance {
+            name,
+            path,
+            launcher: LauncherKind::Vanilla,
+            mc_version: None,
+            loader_type,
+            loader_version,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Discover every instance we can find automatically.
+pub fn discover_all() -> Vec<DetectedInstance> {
+    let mut out = Vec::new();
+    for root in default_curseforge_roots() {
+        out.extend(scan_curseforge_instances(&root));
+    }
+    if let Some(dotmc) = default_dotminecraft() {
+        if let Ok(text) = std::fs::read_to_string(dotmc.join("launcher_profiles.json")) {
+            out.extend(parse_launcher_profiles(&text, &dotmc));
+        }
+    }
+    out
+}
+
+/// Candidate CurseForge Instances roots for the current OS/user.
+pub fn default_curseforge_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(h) = home_dir() {
+        for sub in [
+            "curseforge/minecraft/Instances",
+            "Documents/curseforge/minecraft/Instances",
+            "Dokumente/curseforge/minecraft/Instances",
+            "OneDrive/Documents/curseforge/minecraft/Instances",
+        ] {
+            roots.push(h.join(sub));
+        }
+    }
+    roots
+}
+
+/// The default `.minecraft` directory for the current OS.
+pub fn default_dotminecraft() -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(".minecraft"))
+    } else if cfg!(target_os = "macos") {
+        home_dir().map(|h| h.join("Library/Application Support/minecraft"))
+    } else {
+        home_dir().map(|h| h.join(".minecraft"))
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn loader_type_from_name(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    // Order matters: "neoforge" also contains "forge".
+    if n.contains("neoforge") {
+        "neoforge"
+    } else if n.contains("fabric") {
+        "fabric"
+    } else if n.contains("quilt") {
+        "quilt"
+    } else if n.contains("forge") {
+        "forge"
+    } else {
+        "neoforge"
+    }
+}
+
+/// Interpret a launcher `lastVersionId` (e.g. `neoforge-21.1.234`).
+fn parse_version_id(id: &str) -> (Option<String>, Option<String>) {
+    if let Some(rest) = id.strip_prefix("neoforge-") {
+        (Some("neoforge".into()), Some(rest.to_string()))
+    } else if let Some(rest) = id.strip_prefix("forge-") {
+        (Some("forge".into()), Some(rest.to_string()))
+    } else if id.starts_with("fabric") {
+        (Some("fabric".into()), None)
+    } else if id.starts_with("quilt") {
+        (Some("quilt".into()), None)
+    } else {
+        (None, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_curseforge_instance() {
+        let json = r#"{
+            "name": "BonesAndBees",
+            "gameVersion": "1.21.1",
+            "baseModLoader": { "name": "neoforge-21.1.234", "forgeVersion": "21.1.234", "minecraftVersion": "1.21.1" }
+        }"#;
+        let inst = parse_curseforge_instance(Path::new("/x/BonesAndBees"), json).unwrap();
+        assert_eq!(inst.name, "BonesAndBees");
+        assert_eq!(inst.mc_version.as_deref(), Some("1.21.1"));
+        assert_eq!(inst.loader_type.as_deref(), Some("neoforge"));
+        assert_eq!(inst.loader_version.as_deref(), Some("21.1.234"));
+        assert_eq!(inst.launcher, LauncherKind::CurseForge);
+        assert_eq!(inst.path, Path::new("/x/BonesAndBees"));
+    }
+
+    #[test]
+    fn curseforge_parse_needs_a_name() {
+        assert!(parse_curseforge_instance(Path::new("/x"), "{}").is_none());
+        assert!(parse_curseforge_instance(Path::new("/x"), "not json").is_none());
+    }
+
+    #[test]
+    fn scans_instance_folders_and_ignores_others() {
+        let dir = std::env::temp_dir().join(format!("bg-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Alpha")).unwrap();
+        std::fs::create_dir_all(dir.join("Beta")).unwrap();
+        std::fs::create_dir_all(dir.join("NotAnInstance")).unwrap();
+        std::fs::write(
+            dir.join("Alpha/minecraftinstance.json"),
+            r#"{"name":"Alpha","gameVersion":"1.21.1"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Beta/minecraftinstance.json"),
+            r#"{"name":"Beta","gameVersion":"1.20.1"}"#,
+        )
+        .unwrap();
+
+        let found = scan_curseforge_instances(&dir);
+        let names: Vec<&str> = found.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "Beta"], "sorted, junk folder ignored");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_launcher_profiles_with_and_without_gamedir() {
+        let dotmc = Path::new("/home/p/.minecraft");
+        let json = r#"{
+            "profiles": {
+                "aaa": { "name": "BonesAndBees", "gameDir": "/home/p/.minecraft/bab", "lastVersionId": "neoforge-21.1.234" },
+                "bbb": { "name": "Vanilla", "lastVersionId": "1.21.1" }
+            },
+            "version": 3
+        }"#;
+        let mut found = parse_launcher_profiles(json, dotmc);
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(found.len(), 2);
+
+        let bab = found.iter().find(|i| i.name == "BonesAndBees").unwrap();
+        assert_eq!(bab.path, Path::new("/home/p/.minecraft/bab"));
+        assert_eq!(bab.loader_type.as_deref(), Some("neoforge"));
+        assert_eq!(bab.loader_version.as_deref(), Some("21.1.234"));
+
+        let van = found.iter().find(|i| i.name == "Vanilla").unwrap();
+        assert_eq!(van.path, dotmc, "no gameDir -> defaults to .minecraft");
+        assert_eq!(van.loader_type, None);
+    }
+
+    #[test]
+    fn loader_type_distinguishes_forge_from_neoforge() {
+        let nf = parse_curseforge_instance(
+            Path::new("/x"),
+            r#"{"name":"N","baseModLoader":{"name":"neoforge-21.1.234"}}"#,
+        )
+        .unwrap();
+        assert_eq!(nf.loader_type.as_deref(), Some("neoforge"));
+        let f = parse_curseforge_instance(
+            Path::new("/x"),
+            r#"{"name":"F","baseModLoader":{"name":"forge-47.4.0"}}"#,
+        )
+        .unwrap();
+        assert_eq!(f.loader_type.as_deref(), Some("forge"));
+    }
+
+    #[test]
+    fn version_id_parsing() {
+        assert_eq!(
+            parse_version_id("neoforge-21.1.234"),
+            (Some("neoforge".into()), Some("21.1.234".into()))
+        );
+        assert_eq!(parse_version_id("1.21.1"), (None, None));
+        assert_eq!(parse_version_id("fabric-loader-0.16-1.21.1").0, Some("fabric".into()));
+    }
+}

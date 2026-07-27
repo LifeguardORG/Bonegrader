@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Bonegrader",
+  "version": "0.1.0",
+  "identifier": "de.bonesandbees.bonegrader",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Bonegrader",
+        "width": 940,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 520,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "BonesAndBees",
+    "category": "Utility",
+    "shortDescription": "Mod-Updater für den BonesAndBees-Server",
+    "longDescription": "Bonegrader hält dein Minecraft-Mod-Verzeichnis automatisch mit dem Server-Stand synchron — eigene Client-Mods bleiben unangetastet.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

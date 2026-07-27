@@ -1,0 +1,28 @@
+# Bonegrader static channel host — add this block to your existing Caddyfile.
+#
+# Serves a directory that contains one subfolder per channel, e.g.
+#   /srv/bonegrader/main/manifest.json
+#   /srv/bonegrader/main/files/by-hash/<sha1>
+# so the client base URL is  https://bonegrader.example.com/main
+#
+# Replace bonegrader.example.com with your (sub)domain and point an A/AAAA DNS
+# record at the server first — Caddy then provisions HTTPS automatically.
+
+bonegrader.example.com {
+	root * /srv/bonegrader
+	file_server
+
+	# Content-addressed blobs never change -> cache hard.
+	@blobs path */files/by-hash/*
+	header @blobs Cache-Control "public, max-age=31536000, immutable"
+
+	# Manifests must always be revalidated so updates are picked up promptly.
+	@manifest path */manifest.json
+	header @manifest Cache-Control "no-cache"
+
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/bonegrader.log
+	}
+}

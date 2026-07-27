@@ -1,0 +1,26 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# Tauri: generated schemas/artifacts (regenerated on build)
+/app/src-tauri/gen
+
+# Bonegrader runtime artifacts (created inside target instances, not this repo)
+.bonegrader-backup/
+.bonegrader-tmp/
+.bonegrader-state.json
+.bonegrader-state.json.tmp
+
+/dist
+*.log
+
+# Built installers staged for the download page (never commit binaries)
+/web/download/
+
+# Editor / IDE / local tooling
+/.idea/
+/.claude/
+
+# Personal notes (not part of the project)
+/Jonas_Coding_1.md
+/Jonas_Schreibstil_4.md

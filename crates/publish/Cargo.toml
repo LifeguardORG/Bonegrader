@@ -1,0 +1,18 @@
+[package]
+name = "bonegrader-publish"
+description = "Dev CLI: scan a Minecraft instance, build the Bonegrader manifest and populate the content-addressed store."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bonegrader-publish"
+path = "src/main.rs"
+
+[dependencies]
+bonegrader-core = { path = "../core" }
+serde_json.workspace = true
+clap.workspace = true
+time.workspace = true
+anyhow.workspace = true

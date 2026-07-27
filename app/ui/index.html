@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bonegrader</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Bonegrader</h1>
+      <p class="subtitle">Mod-Verzeichnis aktualisieren</p>
+    </header>
+
+    <main>
+      <!-- Step 1: channel -->
+      <section class="card">
+        <h2>1 · Server-Channel</h2>
+        <label for="baseUrl">Channel-URL</label>
+        <input id="baseUrl" type="text" placeholder="https://bonegrader.rescue-compete.de/main" />
+      </section>
+
+      <!-- Step 2: instance -->
+      <section class="card">
+        <h2>2 · Instanz wählen</h2>
+        <div id="instances" class="instances">
+          <p class="muted">Suche Instanzen …</p>
+        </div>
+        <details class="manual">
+          <summary>Manuell einen Ordner angeben</summary>
+          <input id="manualPath" type="text" placeholder="/pfad/zur/instanz (enthält mods/)" />
+          <button id="useManual" class="ghost">Diesen Ordner verwenden</button>
+        </details>
+        <p id="selected" class="selected"></p>
+      </section>
+
+      <div class="actions">
+        <button id="checkBtn" disabled>Prüfen</button>
+      </div>
+
+      <!-- Step 3: plan -->
+      <section id="planCard" class="card hidden">
+        <h2>3 · Änderungen</h2>
+        <div id="planBody"></div>
+        <div class="actions">
+          <button id="applyBtn">Aktualisieren</button>
+        </div>
+        <div id="progress" class="progress hidden">
+          <div class="bar"><div id="bar" class="fill"></div></div>
+          <p id="progressText" class="muted"></p>
+        </div>
+      </section>
+
+      <p id="status" class="status"></p>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>

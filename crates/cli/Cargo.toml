@@ -1,0 +1,18 @@
+[package]
+name = "bonegrader-cli"
+description = "Headless Bonegrader updater — the full detect/plan/apply pipeline over HTTP, without a GUI."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bonegrader"
+path = "src/main.rs"
+
+[dependencies]
+bonegrader-core = { path = "../core" }
+bonegrader-client = { path = "../client", features = ["http"] }
+anyhow.workspace = true
+clap.workspace = true
+time.workspace = true
