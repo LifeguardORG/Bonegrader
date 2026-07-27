@@ -20,6 +20,7 @@
 # Editor / IDE / local tooling
 /.idea/
 /.claude/
+CLAUDE.md
 
 # Personal notes (not part of the project)
 /Jonas_Coding_1.md
