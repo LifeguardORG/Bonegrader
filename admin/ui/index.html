@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bonegrader Admin</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <img class="logo" src="icon.svg" alt="" width="28" height="28" />
+      <div>
+        <h1>Bonegrader Admin</h1>
+        <p class="subtitle">Channel-Updates prüfen und veröffentlichen</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>Einstellungen</h2>
+        <div class="grid">
+          <label class="full">Instanz-Ordner
+            <input id="instance" type="text" placeholder="/pfad/zur/instanz" />
+          </label>
+          <label>Channel
+            <input id="channel" type="text" placeholder="main" />
+          </label>
+          <label>Pack-Name
+            <input id="pack" type="text" placeholder="BonesAndBees" />
+          </label>
+          <label class="full">Channel-URL (Basis fürs Manifest + Live-Vergleich)
+            <input id="baseUrl" type="text" placeholder="https://bonegrader.rescue-compete.de/main" />
+          </label>
+          <label>SSH-Ziel
+            <input id="sshHost" type="text" placeholder="root@server" />
+          </label>
+          <label>Remote-Basis
+            <input id="remoteBase" type="text" placeholder="/srv/bonegrader" />
+          </label>
+          <label class="full">Ignorieren (Dev-Mods, eine Datei/Pfad pro Zeile)
+            <textarea id="ignore" rows="3" placeholder="mods/dev-only.jar"></textarea>
+          </label>
+          <label class="check"><input id="gc" type="checkbox" /> Lokale Orphan-Blobs nach dem Bauen aufräumen (GC)</label>
+        </div>
+        <div class="actions">
+          <button id="previewBtn">Vorschau</button>
+          <button id="publishBtn" class="ghost" disabled>Veröffentlichen</button>
+        </div>
+      </section>
+
+      <section id="resultCard" class="card hidden">
+        <h2>Vorschau</h2>
+        <div id="summary" class="summary"></div>
+        <div id="diffBody"></div>
+        <div id="progress" class="progress hidden">
+          <div class="bar"><div id="bar" class="fill"></div></div>
+          <p id="progressText" class="muted"></p>
+        </div>
+      </section>
+
+      <p id="status" class="status"></p>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>

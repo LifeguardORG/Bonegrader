@@ -1,19 +1,16 @@
-//! `bonegrader-publish` — the developer side of Bonegrader.
-//!
-//! It scans a Minecraft instance, builds a channel manifest and populates a
-//! content-addressed store (`<out>/files/by-hash/<sha1>`) that can be rsync'd to
-//! the server. It always shows the change vs. the previous manifest first, so a
-//! stray dev/junk mod can be caught before anything is shipped.
+//! `bonegrader-publish` — CLI around the publisher library ([`bonegrader_publish`]).
+//! Scans an instance, builds the channel manifest, shows the diff vs. what's live
+//! and populates the content-addressed store for upload.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use bonegrader_core::manifest::{Category, FileEntry, Loader, Manifest};
-use bonegrader_core::scan::{scan_instance, LocalFile};
+use anyhow::Result;
+use bonegrader_core::manifest::Manifest;
+use bonegrader_publish::{
+    build_manifest, category_counts, diff_manifests, gc_store, populate_store, write_manifest,
+    BuildOptions, ManifestDiff,
+};
 use clap::{Args, Parser, Subcommand};
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
 
 #[derive(Parser)]
 #[command(
@@ -67,91 +64,44 @@ struct BuildArgs {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.cmd {
+    match Cli::parse().cmd {
         Cmd::Build(args) => build(args),
     }
 }
 
 fn build(args: BuildArgs) -> Result<()> {
-    if !args.instance.is_dir() {
-        bail!("instance path is not a directory: {}", args.instance.display());
-    }
-
-    // Resolve loader/mc version: CLI overrides, else read minecraftinstance.json.
-    let detected = detect_loader(&args.instance);
-    let mc_version = args
-        .mc_version
-        .clone()
-        .or_else(|| detected.as_ref().map(|d| d.mc_version.clone()))
-        .context("could not determine mc version; pass --mc-version")?;
-    let loader_version = args
-        .loader_version
-        .clone()
-        .or_else(|| detected.as_ref().map(|d| d.loader_version.clone()))
-        .context("could not determine loader version; pass --loader-version")?;
-    let loader_type = detected
-        .as_ref()
-        .map(|d| d.loader_type.clone())
-        .unwrap_or(args.loader_type.clone());
-
-    // Scan the three managed folders.
-    let categories = [Category::Mod, Category::Resourcepack, Category::Shaderpack];
-    let mut local = scan_instance(&args.instance, &categories)
-        .with_context(|| format!("scanning instance {}", args.instance.display()))?;
-
-    // Apply ignore list.
-    let ignore: BTreeSet<&str> = args.ignore.iter().map(String::as_str).collect();
-    let before = local.len();
-    local.retain(|lf| !ignore.contains(lf.file_name.as_str()) && !ignore.contains(lf.path.as_str()));
-    let ignored = before - local.len();
-    local.sort_by(|a, b| a.path.cmp(&b.path));
-
-    // Warn about mods without a stable modId (they fall back to file-name identity).
-    for lf in &local {
-        if lf.category == Category::Mod && lf.mod_ids.is_empty() {
-            eprintln!("  note: no modId for {} (file-name identity)", lf.path);
-        }
-    }
-
-    let files: Vec<FileEntry> = local.iter().map(|lf| build_entry(lf, &args.base_url)).collect();
-
-    let manifest = Manifest {
-        schema_version: 1,
-        pack_name: args.pack.clone(),
-        channel: args.channel.clone(),
-        generated_at: OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap_or_default(),
-        loader: Loader {
-            loader_type,
-            mc_version,
-            loader_version,
-        },
-        files,
+    let opts = BuildOptions {
+        pack: args.pack,
+        channel: args.channel,
+        base_url: args.base_url,
+        mc_version: args.mc_version,
+        loader_version: args.loader_version,
+        loader_type: args.loader_type,
+        ignore: args.ignore,
     };
+    let built = build_manifest(&args.instance, &opts)?;
 
-    // Diff against the previous manifest (if any) and print it.
-    let manifest_path = args.out.join("manifest.json");
-    let previous = load_previous(&manifest_path);
-    print_diff(previous.as_ref(), &manifest);
+    for path in &built.no_modid {
+        eprintln!("  note: no modId for {path} (file-name identity)");
+    }
 
-    let counts = category_counts(&manifest);
+    print_diff(&diff_manifests(load_previous(&args.out).as_ref(), &built.manifest));
+
+    let (mods, rp, sh) = category_counts(&built.manifest);
+    let ign = if built.ignored > 0 {
+        format!(", {} ignored", built.ignored)
+    } else {
+        String::new()
+    };
     println!(
-        "\nManifest: {} files ({} mods, {} resourcepacks, {} shaderpacks){}",
-        manifest.files.len(),
-        counts.0,
-        counts.1,
-        counts.2,
-        if ignored > 0 {
-            format!(", {ignored} ignored")
-        } else {
-            String::new()
-        }
+        "\nManifest: {} files ({mods} mods, {rp} resourcepacks, {sh} shaderpacks){ign}",
+        built.manifest.files.len()
     );
     println!(
         "Loader:   {} {} (MC {})",
-        manifest.loader.loader_type, manifest.loader.loader_version, manifest.loader.mc_version
+        built.manifest.loader.loader_type,
+        built.manifest.loader.loader_version,
+        built.manifest.loader.mc_version
     );
 
     if args.dry_run {
@@ -159,222 +109,40 @@ fn build(args: BuildArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Populate the content-addressed store, then write the manifest last.
-    let copied = populate_store(&args.instance, &args.out, &local)?;
-    write_atomic(&manifest_path, manifest.to_json_pretty()?.as_bytes())?;
-    println!("\nWrote {} ({copied} new blobs).", manifest_path.display());
+    let copied = populate_store(&args.instance, &args.out, &built.local)?;
+    write_manifest(&args.out, &built.manifest)?;
+    println!("\nWrote {}/manifest.json ({copied} new blobs).", args.out.display());
 
     if args.gc {
-        let removed = gc_store(&args.out, &manifest)?;
-        println!("GC: removed {removed} orphaned blobs.");
+        println!("GC: removed {} orphaned blobs.", gc_store(&args.out, &built.manifest)?);
     }
-
     Ok(())
 }
 
-struct DetectedLoader {
-    loader_type: String,
-    mc_version: String,
-    loader_version: String,
+fn load_previous(out: &Path) -> Option<Manifest> {
+    Manifest::from_json(&std::fs::read_to_string(out.join("manifest.json")).ok()?).ok()
 }
 
-/// Best-effort loader detection from a CurseForge `minecraftinstance.json`.
-fn detect_loader(instance_dir: &Path) -> Option<DetectedLoader> {
-    let text = std::fs::read_to_string(instance_dir.join("minecraftinstance.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let bml = v.get("baseModLoader")?;
-    let mc_version = bml
-        .get("minecraftVersion")
-        .and_then(|x| x.as_str())
-        .or_else(|| v.get("gameVersion").and_then(|x| x.as_str()))?
-        .to_string();
-    let loader_version = bml.get("forgeVersion").and_then(|x| x.as_str())?.to_string();
-    let name = bml.get("name").and_then(|x| x.as_str()).unwrap_or_default();
-    let loader_type = if name.contains("fabric") {
-        "fabric"
-    } else {
-        "neoforge"
+fn print_diff(d: &ManifestDiff) {
+    if d.first_build {
+        println!("No previous manifest — first build ({} files).", d.added.len());
+        return;
     }
-    .to_string();
-    Some(DetectedLoader {
-        loader_type,
-        mc_version,
-        loader_version,
-    })
-}
-
-fn build_entry(lf: &LocalFile, base_url: &str) -> FileEntry {
-    let rel = format!("files/by-hash/{}", lf.sha1);
-    let url = if base_url.is_empty() {
-        rel
-    } else {
-        format!("{}/{}", base_url.trim_end_matches('/'), rel)
-    };
-    FileEntry {
-        category: lf.category,
-        path: lf.path.clone(),
-        file_name: lf.file_name.clone(),
-        size: lf.size,
-        sha1: lf.sha1.clone(),
-        mod_id: lf.mod_ids.first().cloned(),
-        mod_version: lf.mod_version.clone(),
-        url,
-    }
-}
-
-fn load_previous(manifest_path: &Path) -> Option<Manifest> {
-    let text = std::fs::read_to_string(manifest_path).ok()?;
-    Manifest::from_json(&text).ok()
-}
-
-fn category_counts(m: &Manifest) -> (usize, usize, usize) {
-    let mut c = (0, 0, 0);
-    for f in &m.files {
-        match f.category {
-            Category::Mod => c.0 += 1,
-            Category::Resourcepack => c.1 += 1,
-            Category::Shaderpack => c.2 += 1,
-        }
-    }
-    c
-}
-
-/// Print a human diff between the old and new manifest, treating same-`modId`
-/// file renames as version updates rather than add+remove pairs.
-fn print_diff(old: Option<&Manifest>, new: &Manifest) {
-    let old = match old {
-        Some(o) => o,
-        None => {
-            println!("No previous manifest — first build ({} files).", new.files.len());
-            return;
-        }
-    };
-
-    let old_by_path: BTreeMap<&str, &FileEntry> =
-        old.files.iter().map(|f| (f.path.as_str(), f)).collect();
-    let new_by_path: BTreeMap<&str, &FileEntry> =
-        new.files.iter().map(|f| (f.path.as_str(), f)).collect();
-    let old_mod_by_id = mods_by_id(old);
-    let new_mod_by_id = mods_by_id(new);
-
-    let mut added: Vec<&FileEntry> = new
-        .files
-        .iter()
-        .filter(|f| !old_by_path.contains_key(f.path.as_str()))
-        .collect();
-    let mut removed: Vec<&FileEntry> = old
-        .files
-        .iter()
-        .filter(|f| !new_by_path.contains_key(f.path.as_str()))
-        .collect();
-    let changed: Vec<(&FileEntry, &FileEntry)> = new
-        .files
-        .iter()
-        .filter_map(|f| {
-            old_by_path
-                .get(f.path.as_str())
-                .filter(|o| o.sha1 != f.sha1)
-                .map(|o| (*o, f))
-        })
-        .collect();
-
-    // Reconcile version bumps: same modId, different path.
-    let mut updated: Vec<(String, String, String)> = Vec::new(); // modId, old file, new file
-    for (mid, nf) in &new_mod_by_id {
-        if let Some(of) = old_mod_by_id.get(mid) {
-            if of.path != nf.path {
-                updated.push((mid.clone(), of.file_name.clone(), nf.file_name.clone()));
-            }
-        }
-    }
-    let updated_ids: BTreeSet<&str> = updated.iter().map(|(id, _, _)| id.as_str()).collect();
-    added.retain(|f| f.mod_id.as_deref().is_none_or(|id| !updated_ids.contains(id)));
-    removed.retain(|f| f.mod_id.as_deref().is_none_or(|id| !updated_ids.contains(id)));
-
-    if added.is_empty() && removed.is_empty() && changed.is_empty() && updated.is_empty() {
+    if d.is_empty() {
         println!("No changes vs. previous manifest.");
         return;
     }
-
     println!("Changes vs. previous manifest:");
-    for (id, o, n) in &updated {
-        println!("  ~ update {id}: {o} -> {n}");
+    for u in &d.updated {
+        println!("  ~ update {}: {} -> {}", u.mod_id, u.old_file, u.new_file);
     }
-    for (o, n) in &changed {
-        println!("  ~ change {} (sha {}… -> {}…)", n.path, short(&o.sha1), short(&n.sha1));
+    for p in &d.changed {
+        println!("  ~ change {p}");
     }
-    for f in &added {
-        println!("  + add    {}", f.path);
+    for p in &d.added {
+        println!("  + add    {p}");
     }
-    for f in &removed {
-        println!("  - remove {}", f.path);
+    for p in &d.removed {
+        println!("  - remove {p}");
     }
-}
-
-fn mods_by_id(m: &Manifest) -> BTreeMap<String, &FileEntry> {
-    let mut out = BTreeMap::new();
-    for f in m.mods() {
-        if let Some(id) = &f.mod_id {
-            out.insert(id.clone(), f);
-        }
-    }
-    out
-}
-
-fn short(sha: &str) -> &str {
-    &sha[..sha.len().min(8)]
-}
-
-/// Copy each scanned file into the content store if absent. Returns new-blob count.
-fn populate_store(instance: &Path, out: &Path, local: &[LocalFile]) -> Result<usize> {
-    let store = out.join("files").join("by-hash");
-    std::fs::create_dir_all(&store)
-        .with_context(|| format!("creating store {}", store.display()))?;
-    let mut copied = 0;
-    for lf in local {
-        let dst = store.join(&lf.sha1);
-        if dst.exists() {
-            continue;
-        }
-        let src = instance.join(&lf.path);
-        // Copy to a temp name then rename, so a blob is never half-written.
-        let tmp = store.join(format!(".{}.tmp", lf.sha1));
-        std::fs::copy(&src, &tmp)
-            .with_context(|| format!("copying {} -> store", src.display()))?;
-        std::fs::rename(&tmp, &dst)?;
-        copied += 1;
-    }
-    Ok(copied)
-}
-
-fn gc_store(out: &Path, manifest: &Manifest) -> Result<usize> {
-    let keep: BTreeSet<&str> = manifest.files.iter().map(|f| f.sha1.as_str()).collect();
-    let store = out.join("files").join("by-hash");
-    let mut removed = 0;
-    if !store.is_dir() {
-        return Ok(0);
-    }
-    for entry in std::fs::read_dir(&store)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') {
-            continue; // skip temp files
-        }
-        if !keep.contains(name.as_ref()) {
-            std::fs::remove_file(entry.path())?;
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }

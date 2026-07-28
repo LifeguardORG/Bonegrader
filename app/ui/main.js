@@ -180,7 +180,7 @@ async function doCheck() {
   planCard.classList.add("hidden");
   try {
     const baseUrl = baseUrlInput.value.trim();
-    const plan = await invoke("plan_update", { instance: selected.path, base_url: baseUrl });
+    const plan = await invoke("plan_update", { instance: selected.path, baseUrl });
     renderPlan(plan);
     await checkLoader(baseUrl);
     setStatus("Prüfung abgeschlossen.", "ok");
@@ -194,7 +194,7 @@ async function doCheck() {
 async function checkLoader(baseUrl) {
   let st;
   try {
-    st = await invoke("loader_status", { base_url: baseUrl, launcher: selected.launcher || "manual" });
+    st = await invoke("loader_status", { baseUrl, launcher: selected.launcher || "manual" });
   } catch {
     return;
   }
@@ -218,9 +218,9 @@ async function checkLoader(baseUrl) {
     btn.setAttribute("aria-disabled", "true");
     try {
       await invoke("install_loader", {
-        base_url: baseUrl,
-        game_dir: selected.path,
-        pack_name: selected.name || "BonesAndBees",
+        baseUrl,
+        gameDir: selected.path,
+        packName: selected.name || "BonesAndBees",
       });
       setStatus("NeoForge installiert. Beim ersten Start lädt der Launcher noch die Spieldateien.", "ok");
       await doCheck();
@@ -240,9 +240,9 @@ async function doApply() {
   try {
     const res = await invoke("apply_update", {
       instance: selected.path,
-      base_url: baseUrlInput.value.trim(),
-      remove_extras: [...removeExtras],
-      keep_collisions: [...keepCollisions],
+      baseUrl: baseUrlInput.value.trim(),
+      removeExtras: [...removeExtras],
+      keepCollisions: [...keepCollisions],
     });
     let msg = `Fertig: ${res.downloaded} geladen, ${res.deleted} entfernt.`;
     if (res.backupDir) msg += " Backup: " + res.backupDir;
