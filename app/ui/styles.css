@@ -152,6 +152,10 @@ button.ghost:hover { background: var(--card-hover); }
 }
 .progress p { margin: 8px 0 0; font-size: 12px; }
 
+.loader-needed { border: 1px solid var(--warn); background: rgba(224, 184, 108, 0.07); border-radius: 10px; padding: 14px 16px; }
+.loader-needed p { margin: 6px 0 12px; }
+.warn-line { color: var(--warn); }
+
 .muted { color: var(--muted); }
 .hidden { display: none; }
 .status { margin-top: 10px; min-height: 20px; font-size: 13px; }

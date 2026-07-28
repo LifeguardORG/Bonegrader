@@ -11,15 +11,17 @@
 use std::path::{Path, PathBuf};
 
 use bonegrader_client::apply::{apply_with_progress, Progress};
-use bonegrader_client::detect::{discover_all, DetectedInstance};
+use bonegrader_client::detect::{default_dotminecraft, discover_all, DetectedInstance};
 use bonegrader_client::exec::{finalize, Decisions};
 use bonegrader_client::http::{fetch_manifest, HttpFetcher};
+use bonegrader_client::install;
 use bonegrader_core::diff::{compute_plan, UpdatePlan};
 use bonegrader_core::manifest::Category;
 use bonegrader_core::scan::scan_instance;
 use bonegrader_core::state::ClientState;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 const STATE_FILE: &str = ".bonegrader-state.json";
@@ -155,12 +157,78 @@ fn timestamp() -> String {
     )
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoaderStatus {
+    needed: bool,
+    installed: bool,
+    java_available: bool,
+    loader_type: String,
+    loader_version: String,
+    mc_version: String,
+}
+
+/// For the vanilla launcher: does the pack's NeoForge version need installing?
+#[tauri::command]
+async fn loader_status(base_url: String, launcher: String) -> Result<LoaderStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<LoaderStatus, String> {
+        let loader = fetch_manifest(&base_url).map_err(|e| e.to_string())?.loader;
+        let vanilla_neoforge = launcher.eq_ignore_ascii_case("vanilla")
+            && loader.loader_type.eq_ignore_ascii_case("neoforge");
+        let (installed, java_available) = match default_dotminecraft() {
+            Some(dotmc) if vanilla_neoforge => (
+                install::is_installed(&dotmc, &loader.loader_version),
+                install::find_java(&dotmc).is_some(),
+            ),
+            _ => (false, false),
+        };
+        Ok(LoaderStatus {
+            needed: vanilla_neoforge && !installed,
+            installed,
+            java_available,
+            loader_type: loader.loader_type,
+            loader_version: loader.loader_version,
+            mc_version: loader.mc_version,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Install the pack's NeoForge version into .minecraft plus a dedicated profile.
+#[tauri::command]
+async fn install_loader(base_url: String, game_dir: String, pack_name: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        let dotmc = default_dotminecraft().ok_or_else(|| ".minecraft-Ordner nicht gefunden".to_string())?;
+        let loader_version = fetch_manifest(&base_url).map_err(|e| e.to_string())?.loader.loader_version;
+        let fetcher = HttpFetcher::new();
+        install::ensure_client(
+            &dotmc,
+            &loader_version,
+            &fetcher,
+            "bonegrader",
+            &pack_name,
+            Path::new(&game_dir),
+            &now_iso(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn now_iso() -> String {
+    OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default()
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             detect_instances,
             plan_update,
-            apply_update
+            apply_update,
+            loader_status,
+            install_loader
         ])
         .run(tauri::generate_context!())
         .expect("error while running Bonegrader");

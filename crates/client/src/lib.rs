@@ -16,3 +16,4 @@ pub mod detect;
 pub mod exec;
 #[cfg(feature = "http")]
 pub mod http;
+pub mod install;

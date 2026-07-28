@@ -179,15 +179,56 @@ async function doCheck() {
   setStatus("Prüfe …", "busy");
   planCard.classList.add("hidden");
   try {
-    const plan = await invoke("plan_update", {
-      instance: selected.path,
-      base_url: baseUrlInput.value.trim(),
-    });
+    const baseUrl = baseUrlInput.value.trim();
+    const plan = await invoke("plan_update", { instance: selected.path, base_url: baseUrl });
     renderPlan(plan);
+    await checkLoader(baseUrl);
     setStatus("Prüfung abgeschlossen.", "ok");
   } catch (e) {
     setStatus("Fehler: " + e, "err");
   }
+}
+
+// For vanilla-launcher instances: if the pack's NeoForge loader is missing,
+// prepend an install step to the plan.
+async function checkLoader(baseUrl) {
+  let st;
+  try {
+    st = await invoke("loader_status", { base_url: baseUrl, launcher: selected.launcher || "manual" });
+  } catch {
+    return;
+  }
+  if (!st.needed) return;
+
+  const box = document.createElement("div");
+  box.className = "plan-group loader-needed";
+  box.innerHTML =
+    "<h3>NeoForge wird benötigt</h3>" +
+    '<p class="muted">Für diese Instanz fehlt der Mod-Loader <b>NeoForge ' + st.loaderVersion +
+    "</b> (MC " + st.mcVersion + ").</p>" +
+    (st.javaAvailable ? "" : '<p class="warn-line">Achtung: Kein Java gefunden — starte Minecraft einmal oder installiere Java, dann erneut prüfen.</p>') +
+    '<button id="installLoaderBtn" class="btn btn-primary">NeoForge installieren</button>';
+  planBody.prepend(box);
+  planCard.classList.remove("hidden");
+
+  const btn = box.querySelector("#installLoaderBtn");
+  if (!st.javaAvailable) btn.setAttribute("aria-disabled", "true");
+  btn.addEventListener("click", async () => {
+    setStatus("Installiere NeoForge … (kann etwas dauern)", "busy");
+    btn.setAttribute("aria-disabled", "true");
+    try {
+      await invoke("install_loader", {
+        base_url: baseUrl,
+        game_dir: selected.path,
+        pack_name: selected.name || "BonesAndBees",
+      });
+      setStatus("NeoForge installiert. Beim ersten Start lädt der Launcher noch die Spieldateien.", "ok");
+      await doCheck();
+    } catch (e) {
+      setStatus("Fehler bei der Installation: " + e, "err");
+      btn.removeAttribute("aria-disabled");
+    }
+  });
 }
 
 async function doApply() {
