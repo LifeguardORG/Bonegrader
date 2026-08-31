@@ -4,7 +4,7 @@ members = ["crates/core", "crates/publish", "crates/client", "crates/cli", "app/
 
 [workspace.package]
 edition = "2021"
-version = "1.0.0"
+version = "1.1.0"
 license = "MIT OR Apache-2.0"
 authors = ["Jonas"]
 
