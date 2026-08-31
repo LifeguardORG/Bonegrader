@@ -8,51 +8,131 @@
   </head>
   <body>
     <header>
-      <h1>Bonegrader</h1>
-      <p class="subtitle">Mod-Verzeichnis aktualisieren</p>
+      <img class="logo" src="logo.svg" alt="Bonegrader-Logo" />
+      <div class="header-text">
+        <h1>Bonegrader</h1>
+        <p class="subtitle">Mod-Verzeichnis aktualisieren</p>
+      </div>
     </header>
 
-    <main>
-      <!-- Step 1: channel -->
-      <section class="card">
-        <h2>1 · Server-Channel</h2>
-        <label for="baseUrl">Channel-URL</label>
-        <input id="baseUrl" type="text" placeholder="https://bonegrader.rescue-compete.de/main" />
-      </section>
+    <div class="wizard">
+      <!-- Left: vertical stepper -->
+      <aside class="stepper" id="stepper">
+        <button class="step-dot" data-step="1" type="button">
+          <span class="dot">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="7" rx="1.6" />
+              <rect x="3" y="13" width="18" height="7" rx="1.6" />
+              <line x1="7" y1="7.5" x2="7.01" y2="7.5" />
+              <line x1="7" y1="16.5" x2="7.01" y2="16.5" />
+            </svg>
+          </span>
+          <span class="step-label"><span class="step-num">Schritt 1</span>Server</span>
+        </button>
 
-      <!-- Step 2: instance -->
-      <section class="card">
-        <h2>2 · Instanz wählen</h2>
-        <div id="instances" class="instances">
-          <p class="muted">Suche Instanzen …</p>
-        </div>
-        <details class="manual">
-          <summary>Manuell einen Ordner angeben</summary>
-          <input id="manualPath" type="text" placeholder="/pfad/zur/instanz (enthält mods/)" />
-          <button id="useManual" class="ghost">Diesen Ordner verwenden</button>
-        </details>
-        <p id="selected" class="selected"></p>
-      </section>
+        <button class="step-dot" data-step="2" type="button">
+          <span class="dot">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.2" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </span>
+          <span class="step-label"><span class="step-num">Schritt 2</span>Instanz</span>
+        </button>
 
-      <div class="actions">
-        <button id="checkBtn" disabled>Prüfen</button>
-      </div>
+        <button class="step-dot" data-step="3" type="button">
+          <span class="dot">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 18h6" />
+              <path d="M10 22h4" />
+              <path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" />
+            </svg>
+          </span>
+          <span class="step-label"><span class="step-num">Schritt 3</span>Änderungen</span>
+        </button>
+      </aside>
 
-      <!-- Step 3: plan -->
-      <section id="planCard" class="card hidden">
-        <h2>3 · Änderungen</h2>
-        <div id="planBody"></div>
-        <div class="actions">
-          <button id="applyBtn">Aktualisieren</button>
-        </div>
-        <div id="progress" class="progress hidden">
-          <div class="bar"><div id="bar" class="fill"></div></div>
-          <p id="progressText" class="muted"></p>
-        </div>
-      </section>
+      <!-- Right: one step panel at a time -->
+      <main class="step-panels">
+        <p id="status" class="status"></p>
 
-      <p id="status" class="status"></p>
-    </main>
+        <!-- Step 1: channel -->
+        <section class="panel card" data-step="1">
+          <h2>Server-Channel</h2>
+          <label for="baseUrl">Channel-URL</label>
+          <input id="baseUrl" type="text" placeholder="https://bonegrader.rescue-compete.de/main" />
+          <p class="muted hint">Adresse des Update-Servers — der Standard ist bereits vorbelegt.</p>
+          <div class="actions">
+            <button id="next1" type="button">Weiter</button>
+          </div>
+        </section>
+
+        <!-- Step 2: instance -->
+        <section class="panel card" data-step="2">
+          <h2>Instanz wählen</h2>
+          <div id="instances" class="instances">
+            <p class="muted">Suche Instanzen …</p>
+          </div>
+          <details class="manual">
+            <summary>Manuell einen Ordner angeben</summary>
+            <input id="manualPath" type="text" placeholder="/pfad/zur/instanz (enthält mods/)" />
+            <button id="useManual" class="ghost" type="button">Diesen Ordner verwenden</button>
+          </details>
+          <p id="selected" class="selected"></p>
+          <div class="actions">
+            <button class="ghost" type="button" data-goto="1">Zurück</button>
+            <button id="checkBtn" type="button" disabled>Prüfen</button>
+          </div>
+        </section>
+
+        <!-- Step 3: plan -->
+        <section id="planCard" class="panel card" data-step="3">
+          <h2>Änderungen</h2>
+          <div id="planBody"></div>
+          <div id="progress" class="progress hidden">
+            <div class="bar"><div id="bar" class="fill"></div></div>
+            <p id="progressText" class="muted"></p>
+          </div>
+          <div class="actions">
+            <button class="ghost" type="button" data-goto="2">Zurück</button>
+            <button id="applyBtn" type="button">Aktualisieren</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- decorative bee peeking in from the bottom-left corner -->
+    <svg class="bee-corner" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <defs>
+        <clipPath id="beeClip"><ellipse cx="60" cy="72" rx="30" ry="34" /></clipPath>
+      </defs>
+      <!-- wings -->
+      <g fill="#dff0ff" fill-opacity="0.5" stroke="#a9cbe6" stroke-opacity="0.45" stroke-width="1.5">
+        <ellipse cx="40" cy="50" rx="15" ry="25" transform="rotate(-26 40 50)" />
+        <ellipse cx="80" cy="50" rx="15" ry="25" transform="rotate(26 80 50)" />
+      </g>
+      <!-- abdomen -->
+      <ellipse cx="60" cy="72" rx="30" ry="34" fill="#e6bd72" stroke="#3a2f16" stroke-width="2" />
+      <!-- stripes -->
+      <g clip-path="url(#beeClip)" fill="#23262f">
+        <rect x="27" y="52" width="66" height="8.5" />
+        <rect x="27" y="70" width="66" height="8.5" />
+        <rect x="27" y="88" width="66" height="8.5" />
+      </g>
+      <!-- stinger -->
+      <path d="M60 106 l-5 9 10 0 z" fill="#23262f" />
+      <!-- head -->
+      <circle cx="60" cy="34" r="17" fill="#23262f" />
+      <circle cx="53.5" cy="33" r="2.8" fill="#eef2f7" />
+      <circle cx="66.5" cy="33" r="2.8" fill="#eef2f7" />
+      <!-- antennae -->
+      <g stroke="#23262f" stroke-width="2.4" fill="#23262f" stroke-linecap="round">
+        <path d="M53 19 q-7 -7 -14 -8" fill="none" />
+        <circle cx="38" cy="10.5" r="3" />
+        <path d="M67 19 q7 -7 14 -8" fill="none" />
+        <circle cx="82" cy="10.5" r="3" />
+      </g>
+    </svg>
 
     <script src="main.js"></script>
   </body>

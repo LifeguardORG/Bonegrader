@@ -160,53 +160,117 @@ fn timestamp() -> String {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LoaderStatus {
+    /// `"ok" | "missing" | "mismatch" | "unmanaged" | "unknown"`.
+    state: String,
+    /// Bonegrader can install/repair the loader itself (vanilla + NeoForge).
+    can_install: bool,
+    /// Convenience for the frontend: show an install/repair affordance.
     needed: bool,
-    installed: bool,
     java_available: bool,
-    loader_type: String,
-    loader_version: String,
+    /// The required NeoForge version exists under `.minecraft/versions`
+    /// (it may still not be the profile the player actually launches).
+    on_disk: bool,
+    /// Loader the pack requires (from the manifest).
+    required_type: String,
+    required_version: String,
     mc_version: String,
+    /// Loader the selected instance currently uses, if known.
+    installed_type: Option<String>,
+    installed_version: Option<String>,
 }
 
-/// For the vanilla launcher: does the pack's NeoForge version need installing?
+/// Compare the selected instance's loader against the pack's required loader.
+///
+/// This runs for *every* launcher type, so a wrong or missing NeoForge version
+/// is reported instead of silently ignored — including for CurseForge and
+/// manually-picked instances. Bonegrader can only auto-install for the vanilla
+/// (official launcher) + NeoForge path; elsewhere it just flags the mismatch so
+/// the player can fix it in their launcher.
 #[tauri::command]
-async fn loader_status(base_url: String, launcher: String) -> Result<LoaderStatus, String> {
+async fn loader_status(
+    base_url: String,
+    launcher: String,
+    loader_type: Option<String>,
+    loader_version: Option<String>,
+) -> Result<LoaderStatus, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<LoaderStatus, String> {
-        let loader = fetch_manifest(&base_url).map_err(|e| e.to_string())?.loader;
-        let vanilla_neoforge = launcher.eq_ignore_ascii_case("vanilla")
-            && loader.loader_type.eq_ignore_ascii_case("neoforge");
-        let (installed, java_available) = match default_dotminecraft() {
-            Some(dotmc) if vanilla_neoforge => (
-                install::is_installed(&dotmc, &loader.loader_version),
-                install::find_java(&dotmc).is_some(),
-            ),
-            _ => (false, false),
+        let required = fetch_manifest(&base_url).map_err(|e| e.to_string())?.loader;
+
+        let is_vanilla = launcher.eq_ignore_ascii_case("vanilla");
+        let required_neoforge = required.loader_type.eq_ignore_ascii_case("neoforge");
+        let can_install = is_vanilla && required_neoforge;
+
+        let type_ok = loader_type
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case(&required.loader_type));
+        let version_ok = loader_version
+            .as_deref()
+            .is_some_and(|v| v == required.loader_version);
+
+        // Vanilla path: also check whether the required version exists on disk
+        // and whether a Java runtime is reachable for a fresh install.
+        let dotmc = is_vanilla.then(default_dotminecraft).flatten();
+        let on_disk = dotmc
+            .as_deref()
+            .is_some_and(|d| install::is_installed(d, &required.loader_version));
+        let java_available = dotmc
+            .as_deref()
+            .is_some_and(|d| install::find_java(d).is_some());
+
+        let state = if type_ok && version_ok {
+            "ok"
+        } else if loader_type.is_none() && loader_version.is_none() {
+            // No loader recorded for the instance at all.
+            if is_vanilla { "missing" } else { "unknown" }
+        } else if !can_install {
+            // We can see the mismatch but can't fix it (CurseForge / non-NeoForge).
+            "unmanaged"
+        } else if type_ok {
+            "mismatch" // right loader family, wrong version
+        } else {
+            "missing" // wrong family entirely, or a version we can't match
         };
+
+        let needed = can_install && state != "ok";
+
         Ok(LoaderStatus {
-            needed: vanilla_neoforge && !installed,
-            installed,
+            state: state.into(),
+            can_install,
+            needed,
             java_available,
-            loader_type: loader.loader_type,
-            loader_version: loader.loader_version,
-            mc_version: loader.mc_version,
+            on_disk,
+            required_type: required.loader_type,
+            required_version: required.loader_version,
+            mc_version: required.mc_version,
+            installed_type: loader_type,
+            installed_version: loader_version,
         })
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// Install the pack's NeoForge version into .minecraft plus a dedicated profile.
+/// Install the pack's NeoForge version and bind a launcher profile to it. When
+/// the player selected an existing official-launcher profile, `profile_key`
+/// targets that profile so it is converted to NeoForge *in place* — instead of
+/// leaving their selected (vanilla) profile untouched and adding a duplicate.
 #[tauri::command]
-async fn install_loader(base_url: String, game_dir: String, pack_name: String) -> Result<bool, String> {
+async fn install_loader(
+    base_url: String,
+    game_dir: String,
+    pack_name: String,
+    profile_key: Option<String>,
+) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let dotmc = default_dotminecraft().ok_or_else(|| ".minecraft-Ordner nicht gefunden".to_string())?;
         let loader_version = fetch_manifest(&base_url).map_err(|e| e.to_string())?.loader.loader_version;
         let fetcher = HttpFetcher::new();
+        let key = profile_key.as_deref().filter(|k| !k.is_empty()).unwrap_or("bonegrader");
         install::ensure_client(
             &dotmc,
             &loader_version,
             &fetcher,
-            "bonegrader",
+            key,
             &pack_name,
             Path::new(&game_dir),
             &now_iso(),
