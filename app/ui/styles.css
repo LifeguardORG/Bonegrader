@@ -23,8 +23,13 @@ body {
 }
 
 header {
-  padding: 20px 24px 8px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 24px 10px;
 }
+.logo { width: 46px; height: 46px; flex: none; }
+.header-text { min-width: 0; }
 header h1 {
   margin: 0;
   font-size: 22px;
@@ -62,7 +67,20 @@ input[type="text"] {
 }
 input[type="text"]:focus { outline: none; border-color: var(--accent); }
 
-.instances { display: flex; flex-direction: column; gap: 8px; }
+.instances {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Only with more than 3 instances: cap the height and scroll the list itself. */
+.instances.scroll {
+  max-height: 196px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.instances.scroll::-webkit-scrollbar { width: 8px; }
+.instances.scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+.instances.scroll::-webkit-scrollbar-track { background: transparent; }
 .instance {
   display: flex;
   align-items: center;
@@ -162,3 +180,132 @@ button.ghost:hover { background: var(--card-hover); }
 .status.err { color: var(--danger); }
 .status.ok { color: var(--accent); }
 .status.busy { color: var(--warn); }
+
+/* ---------- Wizard (stepper + step panels) ---------- */
+.wizard {
+  display: grid;
+  grid-template-columns: 172px 1fr;
+  gap: 16px;
+  padding: 14px 24px 30px;
+  max-width: 900px;
+  align-items: start;
+}
+
+/* Left rail */
+.stepper {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  position: relative;
+  padding: 6px 0;
+}
+/* connector spans only the gap between consecutive dots (never through an icon) */
+.step-dot:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 22px; /* dot centre (23) minus half the 2px line */
+  top: 46px; /* just below this 46px dot */
+  width: 2px;
+  height: 26px; /* == .stepper gap; reaches the next dot */
+  background: var(--border);
+  z-index: 0;
+}
+.step-dot {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  position: relative;
+  z-index: 1;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: var(--muted);
+  cursor: default;
+  border-radius: 8px;
+}
+.step-dot .dot {
+  flex: none;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  transition: border-color 0.15s, color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.step-dot .dot svg { width: 21px; height: 21px; }
+.step-label {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  font-weight: 600;
+  color: var(--muted);
+}
+.step-label .step-num {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.75;
+}
+
+/* states: default circles stay grey; only the current step is marked */
+.step-dot { border-radius: 999px; }
+/* cancel the base <button> green fill so hovering doesn't draw a rectangle */
+.step-dot:hover { background: transparent; }
+.step-dot.done { cursor: pointer; }
+.step-dot.done .step-label { color: var(--text); }
+/* the round circle is the only thing that reacts to hover */
+.step-dot:not(:disabled):hover .dot {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.step-dot.active .dot {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 4px rgba(111, 209, 122, 0.15);
+}
+.step-dot.active .step-label { color: var(--text); }
+.step-dot:disabled { opacity: 0.5; }
+
+/* Right column: one panel visible at a time */
+.step-panels { min-width: 0; padding: 0; max-width: none; }
+.panel { display: none; margin-bottom: 0; }
+.panel.active { display: block; animation: panelIn 0.18s ease; }
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.hint { margin-top: 10px; font-size: 12px; }
+.step-panels .status { margin: 0 0 10px; min-height: 0; }
+.step-panels .status:empty { display: none; }
+
+/* Keep the fixed window intact: a long change-list scrolls, buttons stay put. */
+#planBody { max-height: 220px; overflow-y: auto; padding-right: 4px; }
+#planBody::-webkit-scrollbar { width: 8px; }
+#planBody::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+#planBody::-webkit-scrollbar-track { background: transparent; }
+
+/* decorative bee peeking in from the bottom-left corner */
+.bee-corner {
+  position: fixed;
+  left: -54px;
+  bottom: -56px;
+  width: 132px;
+  height: 132px;
+  transform: rotate(11deg);
+  opacity: 0.92;
+  pointer-events: none;
+  z-index: 5;
+}
+
+@media (max-width: 620px) {
+  .wizard { grid-template-columns: 1fr; }
+  .stepper { flex-direction: row; justify-content: space-between; gap: 8px; }
+  .stepper::before { left: 30px; right: 30px; top: 23px; bottom: auto; width: auto; height: 2px; }
+  .step-label .step-num { display: none; }
+}

@@ -16,10 +16,17 @@ const progressBox = el("progress");
 const progressBar = el("bar");
 const progressText = el("progressText");
 
+const stepper = el("stepper");
+const stepDots = [...stepper.querySelectorAll(".step-dot")];
+const panels = [...document.querySelectorAll(".panel")];
+const next1 = el("next1");
+
 const listen = window.__TAURI__?.event?.listen;
 
 let selected = null; // { path, name }
 let lastPlan = null;
+let currentStep = 1; // step shown on the right
+let maxStep = 1; // furthest step reached so far (controls what's clickable)
 
 function setStatus(msg, kind = "") {
   statusLine.textContent = msg;
@@ -27,7 +34,30 @@ function setStatus(msg, kind = "") {
 }
 
 function refreshCheckEnabled() {
-  checkBtn.disabled = !(selected && baseUrlInput.value.trim());
+  const hasUrl = !!baseUrlInput.value.trim();
+  next1.disabled = !hasUrl;
+  checkBtn.disabled = !(selected && hasUrl);
+}
+
+// --- Wizard step machine ---------------------------------------------------
+function renderStepper() {
+  stepDots.forEach((dot) => {
+    const n = Number(dot.dataset.step);
+    const reachable = n <= maxStep;
+    dot.classList.toggle("active", n === currentStep);
+    dot.classList.toggle("done", reachable && n !== currentStep);
+    dot.disabled = !reachable;
+  });
+}
+
+// Show step `n`. `grow` unlocks it (and marks it reachable) when advancing.
+function goStep(n, { grow = false } = {}) {
+  if (n < 1 || n > panels.length) return;
+  if (grow) maxStep = Math.max(maxStep, n);
+  if (n > maxStep) return;
+  currentStep = n;
+  panels.forEach((p) => p.classList.toggle("active", Number(p.dataset.step) === n));
+  renderStepper();
 }
 
 function humanBytes(n) {
@@ -73,24 +103,53 @@ function selectInstance(inst, node) {
 
 function renderInstances(list) {
   instancesBox.innerHTML = "";
+  instancesBox.classList.toggle("scroll", list.length > 3);
   if (!list.length) {
     instancesBox.innerHTML = '<p class="muted">Keine Instanz automatisch gefunden — bitte manuell angeben.</p>';
     return;
   }
+  let firstNode = null;
   for (const inst of list) {
     const node = document.createElement("div");
     node.className = "instance";
-    const loader = [inst.loaderType, inst.loaderVersion].filter(Boolean).join(" ") || "?";
+    const loaderStr = [inst.loaderType, inst.loaderVersion].filter(Boolean).join(" ");
     const mc = inst.mcVersion ? "MC " + inst.mcVersion : "";
+    let meta;
+    if (loaderStr) meta = [loaderStr, mc].filter(Boolean).join(" · ");
+    else if (mc) meta = mc + " · NeoForge nicht installiert";
+    else meta = "Loader unbekannt";
     node.innerHTML =
       '<div><div class="name"></div><div class="meta"></div></div>' +
       '<span class="badge"></span>';
     node.querySelector(".name").textContent = inst.name;
-    node.querySelector(".meta").textContent = [loader, mc].filter(Boolean).join(" · ");
+    node.querySelector(".meta").textContent = meta;
     node.querySelector(".badge").textContent = inst.launcher;
     node.addEventListener("click", () => selectInstance(inst, node));
     instancesBox.appendChild(node);
+    if (!firstNode) firstNode = node;
   }
+  // Pre-select the first instance so "Prüfen" is ready (unless one is already chosen).
+  if (!selected && firstNode) selectInstance(list[0], firstNode);
+}
+
+// Re-detect instances and re-render the list, keeping the current selection
+// bound to its freshly detected data — so its loader/version reflect reality
+// after an install, not just the values read at startup.
+async function refreshInstances() {
+  let list = [];
+  try {
+    list = await invoke("detect_instances");
+  } catch {
+    return;
+  }
+  renderInstances(list);
+  if (!selected) return;
+  const idx = list.findIndex((i) =>
+    (selected.profileKey && i.profileKey === selected.profileKey) ||
+    (i.path === selected.path && i.name === selected.name));
+  if (idx < 0) return;
+  const nodes = instancesBox.querySelectorAll(".instance");
+  selectInstance(list[idx], nodes[idx] || null);
 }
 
 function row(tagClass, tagText, text, control) {
@@ -171,13 +230,14 @@ function renderPlan(plan) {
   } else {
     applyBtn.disabled = false;
   }
-  planCard.classList.remove("hidden");
 }
 
 async function doCheck() {
   if (!invoke) return setStatus("Läuft nur in der Bonegrader-App (Tauri).", "err");
+  // Go straight to the changes step; the check status shows above its card.
+  goStep(3, { grow: true });
+  planBody.innerHTML = "";
   setStatus("Prüfe …", "busy");
-  planCard.classList.add("hidden");
   try {
     const baseUrl = baseUrlInput.value.trim();
     const plan = await invoke("plan_update", { instance: selected.path, baseUrl });
@@ -189,46 +249,94 @@ async function doCheck() {
   }
 }
 
-// For vanilla-launcher instances: if the pack's NeoForge loader is missing,
-// prepend an install step to the plan.
+// Compare the selected instance's loader against the pack's required loader.
+// Runs for every launcher type: the vanilla + NeoForge path can be installed or
+// repaired from here; other launchers only get a warning so the player can fix
+// the version in their own launcher.
 async function checkLoader(baseUrl) {
   let st;
   try {
-    st = await invoke("loader_status", { baseUrl, launcher: selected.launcher || "manual" });
+    st = await invoke("loader_status", {
+      baseUrl,
+      launcher: selected.launcher || "manual",
+      loaderType: selected.loaderType || null,
+      loaderVersion: selected.loaderVersion || null,
+    });
   } catch {
     return;
   }
-  if (!st.needed) return;
+  if (st.state === "ok") return;
+
+  const req = st.requiredType + " " + st.requiredVersion;
+  const have = st.installedType || st.installedVersion
+    ? (st.installedType || "?") + " " + (st.installedVersion || "?")
+    : null;
 
   const box = document.createElement("div");
   box.className = "plan-group loader-needed";
-  box.innerHTML =
-    "<h3>NeoForge wird benötigt</h3>" +
-    '<p class="muted">Für diese Instanz fehlt der Mod-Loader <b>NeoForge ' + st.loaderVersion +
-    "</b> (MC " + st.mcVersion + ").</p>" +
-    (st.javaAvailable ? "" : '<p class="warn-line">Achtung: Kein Java gefunden — starte Minecraft einmal oder installiere Java, dann erneut prüfen.</p>') +
-    '<button id="installLoaderBtn" class="btn btn-primary">NeoForge installieren</button>';
-  planBody.prepend(box);
-  planCard.classList.remove("hidden");
 
-  const btn = box.querySelector("#installLoaderBtn");
-  if (!st.javaAvailable) btn.setAttribute("aria-disabled", "true");
-  btn.addEventListener("click", async () => {
-    setStatus("Installiere NeoForge … (kann etwas dauern)", "busy");
-    btn.setAttribute("aria-disabled", "true");
-    try {
-      await invoke("install_loader", {
-        baseUrl,
-        gameDir: selected.path,
-        packName: selected.name || "BonesAndBees",
-      });
-      setStatus("NeoForge installiert. Beim ersten Start lädt der Launcher noch die Spieldateien.", "ok");
-      await doCheck();
-    } catch (e) {
-      setStatus("Fehler bei der Installation: " + e, "err");
-      btn.removeAttribute("aria-disabled");
-    }
-  });
+  if (st.canInstall) {
+    const headline = st.state === "mismatch" ? "Falsche NeoForge-Version" : "NeoForge wird benötigt";
+    const detail =
+      st.state === "mismatch"
+        ? "Diese Instanz nutzt <b>" + have + "</b>, der Server braucht aber <b>NeoForge " +
+          st.requiredVersion + "</b> (MC " + st.mcVersion + ")."
+        : "Für diese Instanz fehlt der Mod-Loader <b>NeoForge " + st.requiredVersion +
+          "</b> (MC " + st.mcVersion + ").";
+    box.innerHTML =
+      "<h3>" + headline + "</h3>" +
+      '<p class="muted">' + detail + "</p>" +
+      (st.javaAvailable ? "" : '<p class="warn-line">Achtung: Kein Java gefunden — starte Minecraft einmal oder installiere Java, dann erneut prüfen.</p>') +
+      '<p class="muted">Danach im offiziellen Launcher das Profil <b>' + (selected.name || "BonesAndBees") +
+      "</b> (NeoForge " + st.requiredVersion +
+      ") auswählen — sonst startet weiter Vanilla und der Server-Beitritt schlägt fehl.</p>" +
+      '<button id="installLoaderBtn" class="btn btn-primary">' +
+      (st.state === "mismatch" ? "NeoForge korrigieren" : "NeoForge installieren") +
+      "</button>";
+    planBody.prepend(box);
+
+    const btn = box.querySelector("#installLoaderBtn");
+    if (!st.javaAvailable) btn.setAttribute("aria-disabled", "true");
+    btn.addEventListener("click", async () => {
+      setStatus("Richte NeoForge ein … (kann etwas dauern)", "busy");
+      btn.setAttribute("aria-disabled", "true");
+      try {
+        await invoke("install_loader", {
+          baseUrl,
+          gameDir: selected.path,
+          packName: selected.name || "BonesAndBees",
+          profileKey: selected.profileKey || null,
+        });
+        const name = selected.name || "BonesAndBees";
+        setStatus(
+          selected.profileKey
+            ? "NeoForge " + st.requiredVersion + " eingerichtet — das Profil „" + name +
+                "\" nutzt es jetzt. Im offiziellen Launcher einfach „" + name + "\" starten."
+            : "NeoForge " + st.requiredVersion + " eingerichtet. Im offiziellen Launcher das NeoForge-Profil „" +
+                name + "\" starten.",
+          "ok"
+        );
+        box.remove();
+        // Re-detect so the (now NeoForge) profile updates in the list immediately.
+        await refreshInstances();
+      } catch (e) {
+        setStatus("Fehler bei der Installation: " + e, "err");
+        btn.removeAttribute("aria-disabled");
+      }
+    });
+  } else {
+    // CurseForge / manual / non-NeoForge: Bonegrader can't install here, only warn.
+    const headline = st.state === "unknown" ? "Loader-Version prüfen" : "Falsche Loader-Version";
+    const line = have
+      ? "Diese Instanz nutzt <b>" + have + "</b>, der Server braucht <b>" + req + "</b> (MC " + st.mcVersion + ")."
+      : "Der Server braucht <b>" + req + "</b> (MC " + st.mcVersion +
+        "). Die Loader-Version dieser Instanz ist unbekannt — bitte prüfen.";
+    box.innerHTML =
+      "<h3>" + headline + "</h3>" +
+      '<p class="muted">' + line +
+      " Bitte im Launcher/CurseForge genau diese Version einstellen — sonst schlägt der Server-Beitritt fehl.</p>";
+    planBody.prepend(box);
+  }
 }
 
 async function doApply() {
@@ -266,12 +374,25 @@ async function init() {
     localStorage.setItem("bonegrader.baseUrl", baseUrlInput.value.trim());
     refreshCheckEnabled();
   });
+  // Wizard navigation.
+  next1.addEventListener("click", () => {
+    if (baseUrlInput.value.trim()) goStep(2, { grow: true });
+  });
   checkBtn.addEventListener("click", doCheck);
   applyBtn.addEventListener("click", doApply);
+  stepDots.forEach((dot) =>
+    dot.addEventListener("click", () => goStep(Number(dot.dataset.step)))
+  );
+  document.querySelectorAll("[data-goto]").forEach((btn) =>
+    btn.addEventListener("click", () => goStep(Number(btn.dataset.goto)))
+  );
   el("useManual").addEventListener("click", () => {
     const p = el("manualPath").value.trim();
     if (p) selectInstance({ path: p, name: p.split(/[/\\]/).pop() || p }, null);
   });
+
+  refreshCheckEnabled();
+  goStep(1);
 
   if (!invoke) {
     instancesBox.innerHTML = '<p class="muted">Vorschau-Modus (kein Tauri) — Erkennung inaktiv.</p>';

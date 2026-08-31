@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "bonegrader-admin"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "bonegrader-client",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "bonegrader-app"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "bonegrader-client",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "bonegrader-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "bonegrader-client",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "bonegrader-client"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "bonegrader-core",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "bonegrader-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "bonegrader-publish"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "bonegrader-core",

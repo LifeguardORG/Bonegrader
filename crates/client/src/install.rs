@@ -97,6 +97,37 @@ pub fn upsert_profile(
     serde_json::to_string_pretty(&root).context("serializing launcher_profiles.json")
 }
 
+/// After binding the loader to a *real* launcher profile, drop the separate
+/// auto-created `bonegrader` profile if it points at the same game directory —
+/// otherwise the launcher lists the pack twice. No-op when we *are* the
+/// `bonegrader` profile (manual / CurseForge path) or when no such redundant
+/// profile exists.
+fn prune_duplicate_auto_profile(
+    profiles_json: &str,
+    active_key: &str,
+    game_dir: &Path,
+) -> Result<String> {
+    const AUTO_KEY: &str = "bonegrader";
+    if active_key == AUTO_KEY {
+        return Ok(profiles_json.to_string());
+    }
+    let mut root: Value =
+        serde_json::from_str(profiles_json).context("parsing launcher_profiles.json")?;
+    let Some(profiles) = root.get_mut("profiles").and_then(Value::as_object_mut) else {
+        return Ok(profiles_json.to_string());
+    };
+    let redundant = profiles
+        .get(AUTO_KEY)
+        .and_then(|p| p.get("gameDir"))
+        .and_then(Value::as_str)
+        .is_some_and(|g| Path::new(g) == game_dir);
+    if !redundant {
+        return Ok(profiles_json.to_string());
+    }
+    profiles.remove(AUTO_KEY);
+    serde_json::to_string_pretty(&root).context("serializing launcher_profiles.json")
+}
+
 /// Download the installer and run a headless client install into `dotmc`.
 pub fn run_installer(
     dotmc: &Path,
@@ -124,8 +155,19 @@ pub fn run_installer(
     Ok(())
 }
 
-/// Ensure the NeoForge client and a dedicated launcher profile exist. Returns
-/// `false` (no-op) if the version was already installed.
+/// Ensure the NeoForge client is installed *and* that a dedicated launcher
+/// profile points at it for this pack.
+///
+/// The installer download/run is skipped when the version is already present on
+/// disk, but the launcher profile is **always** upserted. This matters: a
+/// player can have the right NeoForge version installed yet still launch a
+/// *vanilla* profile (its `lastVersionId` is a bare `1.21.1`), so the game
+/// starts without the loader and the server rejects the join. Rewriting the
+/// profile guarantees there is a `neoforge-<version>` profile bound to the
+/// pack's game directory that the player can select.
+///
+/// Returns `true` if the installer actually ran, `false` if only the profile
+/// was (re)written.
 pub fn ensure_client(
     dotmc: &Path,
     loader_version: &str,
@@ -135,21 +177,27 @@ pub fn ensure_client(
     game_dir: &Path,
     created: &str,
 ) -> Result<bool> {
-    if is_installed(dotmc, loader_version) {
-        return Ok(false);
-    }
-    let java = find_java(dotmc).context(
-        "no Java found — install Java or launch Minecraft once so its bundled runtime exists, then retry",
-    )?;
-    run_installer(dotmc, loader_version, fetcher, &java)?;
+    let ran_installer = if is_installed(dotmc, loader_version) {
+        false
+    } else {
+        let java = find_java(dotmc).context(
+            "no Java found — install Java or launch Minecraft once so its bundled runtime exists, then retry",
+        )?;
+        run_installer(dotmc, loader_version, fetcher, &java)?;
+        true
+    };
 
+    // Tolerate a missing profiles file by starting from an empty object.
     let profiles_path = dotmc.join("launcher_profiles.json");
-    let text = std::fs::read_to_string(&profiles_path).context("reading launcher_profiles.json")?;
+    let text = std::fs::read_to_string(&profiles_path).unwrap_or_else(|_| "{}".to_string());
     let updated = upsert_profile(&text, profile_key, profile_name, loader_version, game_dir, created)?;
+    // When we bound the loader to a real profile, drop any leftover auto-created
+    // `bonegrader` duplicate for the same game dir so the launcher shows it once.
+    let updated = prune_duplicate_auto_profile(&updated, profile_key, game_dir)?;
     let tmp = profiles_path.with_extension("json.tmp");
     std::fs::write(&tmp, updated).context("writing launcher_profiles.json")?;
     std::fs::rename(&tmp, &profiles_path).context("swapping launcher_profiles.json")?;
-    Ok(true)
+    Ok(ran_installer)
 }
 
 #[cfg(test)]
@@ -200,5 +248,31 @@ mod tests {
         assert_eq!(v["profiles"]["bonegrader"]["created"], "FIRST", "created timestamp kept across updates");
         assert_eq!(v["profiles"]["bonegrader"]["lastVersionId"], "neoforge-21.1.238", "version updated");
         assert_eq!(v["profiles"]["bonegrader"]["gameDir"], "/b");
+    }
+
+    #[test]
+    fn prune_removes_redundant_auto_profile_only_for_other_keys() {
+        let input = r#"{"profiles":{
+            "52fdc":{"name":"BonesAndBees","lastVersionId":"neoforge-21.1.234","gameDir":"/mc"},
+            "bonegrader":{"name":"BonesAndBees","lastVersionId":"neoforge-21.1.234","gameDir":"/mc"},
+            "latest-release":{"name":"","lastVersionId":"latest-release"}
+        }}"#;
+
+        // Converting the real profile drops the duplicate auto-profile.
+        let out = prune_duplicate_auto_profile(input, "52fdc", Path::new("/mc")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["profiles"]["bonegrader"].is_null(), "duplicate removed");
+        assert!(!v["profiles"]["52fdc"].is_null(), "real profile kept");
+        assert!(!v["profiles"]["latest-release"].is_null(), "unrelated profiles kept");
+
+        // On the manual/CurseForge path we *are* the auto profile — keep it.
+        let keep = prune_duplicate_auto_profile(input, "bonegrader", Path::new("/mc")).unwrap();
+        let vk: Value = serde_json::from_str(&keep).unwrap();
+        assert!(!vk["profiles"]["bonegrader"].is_null(), "auto profile kept on manual path");
+
+        // A `bonegrader` profile for a different game dir is not our duplicate.
+        let other = prune_duplicate_auto_profile(input, "52fdc", Path::new("/elsewhere")).unwrap();
+        let vo: Value = serde_json::from_str(&other).unwrap();
+        assert!(!vo["profiles"]["bonegrader"].is_null(), "different gameDir not pruned");
     }
 }

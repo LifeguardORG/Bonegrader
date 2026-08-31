@@ -30,6 +30,11 @@ pub struct DetectedInstance {
     pub mc_version: Option<String>,
     pub loader_type: Option<String>,
     pub loader_version: Option<String>,
+    /// Official-launcher profile key (from `launcher_profiles.json`), for
+    /// Vanilla instances only. Lets an install target *this* profile in place
+    /// instead of spawning a separate one. `None` for CurseForge / manual picks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_key: Option<String>,
 }
 
 /// Parse a CurseForge `minecraftinstance.json`. `dir` is the instance folder.
@@ -60,6 +65,7 @@ pub fn parse_curseforge_instance(dir: &Path, json: &str) -> Option<DetectedInsta
         mc_version,
         loader_type,
         loader_version,
+        profile_key: None,
     })
 }
 
@@ -110,14 +116,15 @@ pub fn parse_launcher_profiles(json: &str, dotmc: &Path) -> Vec<DetectedInstance
             .and_then(|x| x.as_str())
             .map(PathBuf::from)
             .unwrap_or_else(|| dotmc.to_path_buf());
-        let (loader_type, loader_version) = parse_version_id(last);
+        let (loader_type, loader_version, mc_version) = parse_version_id(last);
         out.push(DetectedInstance {
             name,
             path,
             launcher: LauncherKind::Vanilla,
-            mc_version: None,
+            mc_version,
             loader_type,
             loader_version,
+            profile_key: Some(id.clone()),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -187,19 +194,50 @@ fn loader_type_from_name(name: &str) -> &'static str {
     }
 }
 
-/// Interpret a launcher `lastVersionId` (e.g. `neoforge-21.1.234`).
-fn parse_version_id(id: &str) -> (Option<String>, Option<String>) {
+/// Interpret a launcher `lastVersionId` into
+/// `(loader_type, loader_version, mc_version)`. Examples:
+///   `neoforge-21.1.234`           -> (neoforge, 21.1.234, 1.21.1)
+///   `forge-47.4.0`                -> (forge,    47.4.0,   None)
+///   `fabric-loader-0.16.5-1.21.1` -> (fabric,   None,     1.21.1)
+///   `quilt-loader-0.26-1.21.1`    -> (quilt,    None,     1.21.1)
+///   `1.21.1`                      -> (None,     None,     1.21.1)
+///
+/// A bare Minecraft id (no loader prefix) is a vanilla profile: we surface the
+/// MC version so the UI can show it and flag that no mod loader is installed,
+/// instead of rendering a bare `?`.
+fn parse_version_id(id: &str) -> (Option<String>, Option<String>, Option<String>) {
     if let Some(rest) = id.strip_prefix("neoforge-") {
-        (Some("neoforge".into()), Some(rest.to_string()))
+        (Some("neoforge".into()), Some(rest.to_string()), mc_from_neoforge(rest))
     } else if let Some(rest) = id.strip_prefix("forge-") {
-        (Some("forge".into()), Some(rest.to_string()))
-    } else if id.starts_with("fabric") {
-        (Some("fabric".into()), None)
-    } else if id.starts_with("quilt") {
-        (Some("quilt".into()), None)
+        (Some("forge".into()), Some(rest.to_string()), None)
+    } else if id.starts_with("fabric") || id.starts_with("quilt") {
+        let loader = if id.starts_with("quilt") { "quilt" } else { "fabric" };
+        // `fabric-loader-<loaderVer>-<mc>`: the MC id is the trailing segment.
+        let mc = id.rsplit('-').next().filter(|s| is_mc_version(s)).map(str::to_string);
+        (Some(loader.into()), None, mc)
+    } else if is_mc_version(id) {
+        (None, None, Some(id.to_string()))
     } else {
-        (None, None)
+        (None, None, None)
     }
+}
+
+/// NeoForge versions mirror the Minecraft version: `21.1.234` -> MC `1.21.1`,
+/// `20.4.237` -> MC `1.20.4`. Returns `None` if the shape is unexpected.
+fn mc_from_neoforge(v: &str) -> Option<String> {
+    let mut parts = v.split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (numeric(major) && numeric(minor)).then(|| format!("1.{major}.{minor}"))
+}
+
+/// Loose check for a Mojang release id such as `1.21.1` or `1.21`.
+fn is_mc_version(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() >= 2
+        && parts[0] == "1"
+        && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -270,10 +308,13 @@ mod tests {
         assert_eq!(bab.path, Path::new("/home/p/.minecraft/bab"));
         assert_eq!(bab.loader_type.as_deref(), Some("neoforge"));
         assert_eq!(bab.loader_version.as_deref(), Some("21.1.234"));
+        assert_eq!(bab.mc_version.as_deref(), Some("1.21.1"), "MC derived from the NeoForge version");
+        assert_eq!(bab.profile_key.as_deref(), Some("aaa"), "profile key exposed for in-place install");
 
         let van = found.iter().find(|i| i.name == "Vanilla").unwrap();
         assert_eq!(van.path, dotmc, "no gameDir -> defaults to .minecraft");
         assert_eq!(van.loader_type, None);
+        assert_eq!(van.mc_version.as_deref(), Some("1.21.1"), "bare version id surfaced as MC (no '?')");
     }
 
     #[test]
@@ -296,9 +337,19 @@ mod tests {
     fn version_id_parsing() {
         assert_eq!(
             parse_version_id("neoforge-21.1.234"),
-            (Some("neoforge".into()), Some("21.1.234".into()))
+            (Some("neoforge".into()), Some("21.1.234".into()), Some("1.21.1".into()))
         );
-        assert_eq!(parse_version_id("1.21.1"), (None, None));
-        assert_eq!(parse_version_id("fabric-loader-0.16-1.21.1").0, Some("fabric".into()));
+        assert_eq!(
+            parse_version_id("forge-47.4.0"),
+            (Some("forge".into()), Some("47.4.0".into()), None)
+        );
+        // Bare Minecraft id -> vanilla profile, MC surfaced, no loader.
+        assert_eq!(parse_version_id("1.21.1"), (None, None, Some("1.21.1".into())));
+        let fab = parse_version_id("fabric-loader-0.16-1.21.1");
+        assert_eq!(fab.0, Some("fabric".into()));
+        assert_eq!(fab.1, None);
+        assert_eq!(fab.2, Some("1.21.1".into()));
+        // Unrecognised -> all None.
+        assert_eq!(parse_version_id("latest-release"), (None, None, None));
     }
 }
