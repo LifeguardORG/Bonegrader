@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Bonegrader",
-  "version": "1.1.0",
   "identifier": "de.bonesandbees.bonegrader",
   "build": {
     "frontendDist": "../ui"
