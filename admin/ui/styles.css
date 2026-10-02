@@ -72,3 +72,8 @@ button.ghost:hover:not(:disabled) { background: #232936; }
 .status.err { color: var(--danger); }
 .status.ok { color: var(--accent); }
 .status.busy { color: var(--warn); }
+
+.more { margin-top: 14px; }
+.more summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+label.check { margin-top: 14px; }
+.diff-row code { overflow-wrap: anywhere; }

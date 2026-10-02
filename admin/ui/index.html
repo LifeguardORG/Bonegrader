@@ -19,8 +19,8 @@
       <section class="card">
         <h2>Einstellungen</h2>
         <div class="grid">
-          <label class="full">Instanz-Ordner
-            <input id="instance" type="text" placeholder="/pfad/zur/instanz" />
+          <label class="full">Instanz-Ordner (Quelle des Packs)
+            <input id="instance" type="text" placeholder="/pfad/zur/curseforge/instanz" />
           </label>
           <label>Channel
             <input id="channel" type="text" placeholder="main" />
@@ -29,22 +29,50 @@
             <input id="pack" type="text" placeholder="BonesAndBees" />
           </label>
           <label class="full">Channel-URL (Basis fürs Manifest + Live-Vergleich)
-            <input id="baseUrl" type="text" placeholder="https://bonegrader.rescue-compete.de/main" />
+            <input id="baseUrl" type="text" placeholder="https://bonegrader.example.com/main" />
           </label>
           <label>SSH-Ziel
-            <input id="sshHost" type="text" placeholder="root@server" />
+            <input id="sshHost" type="text" placeholder="deploy@dein-server" />
           </label>
           <label>Remote-Basis
             <input id="remoteBase" type="text" placeholder="/srv/bonegrader" />
           </label>
           <label class="full">Ignorieren (Dev-Mods, eine Datei/Pfad pro Zeile)
-            <textarea id="ignore" rows="3" placeholder="mods/dev-only.jar"></textarea>
+            <textarea id="ignore" rows="2" placeholder="mods/dev-only.jar"></textarea>
           </label>
-          <label class="check"><input id="gc" type="checkbox" /> Lokale Orphan-Blobs nach dem Bauen aufräumen (GC)</label>
         </div>
+
+        <details class="more">
+          <summary>Erweitert: Signatur, Client-Versionen, Server, Standard-Einstellungen</summary>
+          <div class="grid">
+            <label class="full">Signatur-Schlüssel (Pfad, leer = nicht signieren)
+              <input id="signKey" type="text" placeholder="~/.config/bonegrader/manifest-signing.key" />
+            </label>
+            <label>Mindest-Client-Version (ältere Clients werden blockiert)
+              <input id="minClientVersion" type="text" placeholder="z. B. 1.2.0" />
+            </label>
+            <label>Aktuelle Client-Version (Update-Hinweis)
+              <input id="latestClientVersion" type="text" placeholder="z. B. 1.2.0" />
+            </label>
+            <label class="full">Download-Seite für Bonegrader
+              <input id="clientDownloadUrl" type="text" placeholder="https://bonegrader.example.com/" />
+            </label>
+            <label>Server-Name (für die Mehrspieler-Liste)
+              <input id="serverName" type="text" placeholder="BonesAndBees" />
+            </label>
+            <label>Server-Adresse (leer = nicht eintragen)
+              <input id="serverAddress" type="text" placeholder="play.example.com" />
+            </label>
+            <label class="full">Standard-Einstellungen – nur anlegen, wenn beim Spieler fehlend (Datei oder Ordner pro Zeile; erlaubt: options.txt, config/, defaultconfigs/, kubejs/)
+              <textarea id="seeds" rows="2" placeholder="config/jei"></textarea>
+            </label>
+          </div>
+        </details>
+
+        <label class="check"><input id="gc" type="checkbox" /> Lokale Orphan-Blobs nach dem Bauen aufräumen (GC)</label>
         <div class="actions">
-          <button id="previewBtn">Vorschau</button>
-          <button id="publishBtn" class="ghost" disabled>Veröffentlichen</button>
+          <button id="previewBtn" type="button">Vorschau</button>
+          <button id="publishBtn" class="ghost" type="button" disabled>Veröffentlichen</button>
         </div>
       </section>
 
@@ -58,7 +86,7 @@
         </div>
       </section>
 
-      <p id="status" class="status"></p>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
     </main>
 
     <script src="main.js"></script>

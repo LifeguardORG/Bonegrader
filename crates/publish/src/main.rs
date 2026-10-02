@@ -100,7 +100,19 @@ struct KeygenArgs {
     public_out: Option<PathBuf>,
 }
 
-fn main() -> Result<()> {
+/// Errors are printed as one line with their full cause chain (no
+/// backtrace dump), and the process exits with status 1.
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Build(args) => build(*args),
         Cmd::Keygen(args) => {

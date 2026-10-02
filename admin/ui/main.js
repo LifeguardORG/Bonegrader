@@ -1,18 +1,22 @@
 // Bonegrader Admin frontend. Talks to Rust via the global Tauri bridge.
+// Dynamic text is only ever set via textContent.
 
 const invoke = window.__TAURI__?.core?.invoke;
 const listen = window.__TAURI__?.event?.listen;
 
 const el = (id) => document.getElementById(id);
-const FIELDS = ["instance", "channel", "pack", "baseUrl", "sshHost", "remoteBase", "ignore"];
+const TEXT_FIELDS = [
+  "instance", "channel", "pack", "baseUrl", "sshHost", "remoteBase", "ignore",
+  "signKey", "minClientVersion", "latestClientVersion", "clientDownloadUrl",
+  "serverName", "serverAddress", "seeds",
+];
+// Machine-specific values (paths, SSH target) have no defaults: the repo is
+// public, and every admin's setup differs. Values typed once are remembered.
 const DEFAULTS = {
-  instance: "/home/jonas/Documents/curseforge/minecraft/Instances/BonesAndBees",
   channel: "main",
   pack: "BonesAndBees",
   baseUrl: "https://bonegrader.rescue-compete.de/main",
-  sshHost: "root@62.171.170.74",
   remoteBase: "/srv/bonegrader",
-  ignore: "",
 };
 
 const previewBtn = el("previewBtn");
@@ -28,20 +32,40 @@ function setStatus(msg, kind = "") {
   statusLine.className = "status " + kind;
 }
 
+function load(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function store(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* not remembered */
+  }
+}
+
+const lines = (id) => el(id).value.split("\n").map((l) => l.trim()).filter(Boolean);
+
 function settings() {
   const s = {};
-  for (const f of FIELDS) s[f] = el(f).value.trim();
+  for (const f of TEXT_FIELDS) s[f] = el(f).value.trim();
+  s.ignore = lines("ignore");
+  s.seeds = lines("seeds");
+  s.gc = el("gc").checked;
   return s;
 }
 
-function ignoreLines() {
-  return el("ignore").value.split("\n").map((l) => l.trim()).filter(Boolean);
-}
-
 function loadSettings() {
-  for (const f of FIELDS) {
-    el(f).value = localStorage.getItem("admin." + f) ?? DEFAULTS[f];
-    el(f).addEventListener("input", () => localStorage.setItem("admin." + f, el(f).value));
+  for (const f of TEXT_FIELDS) {
+    el(f).value = load("admin." + f) ?? DEFAULTS[f] ?? "";
+    el(f).addEventListener("input", () => {
+      store("admin." + f, el(f).value);
+      publishBtn.disabled = true; // settings changed: preview again first
+    });
   }
 }
 
@@ -73,28 +97,34 @@ function group(title, tagClass, tagText, items) {
   return g;
 }
 
+function note(text, cls) {
+  const p = document.createElement("p");
+  p.className = cls;
+  p.textContent = text;
+  return p;
+}
+
 function renderPreview(res) {
   const summary = el("summary");
-  summary.innerHTML = "";
-  summary.append(
+  summary.replaceChildren(
     pill(`${res.files} Dateien`),
     pill(`${res.mods} Mods · ${res.resourcepacks} RP · ${res.shaderpacks} Shader`),
     pill(res.loader),
     pill(res.liveReachable ? "Server erreichbar" : "Server nicht erreichbar (Erstveröffentlichung)", res.liveReachable ? "" : "warn"),
+    pill(res.signed ? "wird signiert" : "unsigniert", res.signed ? "" : "warn")
   );
+  if (res.seeds > 0) summary.append(pill(`${res.seeds} Standard-Einstellungen`));
   if (res.ignored > 0) summary.append(pill(`${res.ignored} ignoriert`));
   if (res.noModId.length > 0) summary.append(pill(`${res.noModId.length} ohne modId`, "warn"));
 
   const body = el("diffBody");
-  body.innerHTML = "";
+  body.replaceChildren();
   const d = res.diff;
   if (d.firstBuild) {
-    body.append(group("Erstveröffentlichung", "add", "neu", d.added) || document.createElement("div"));
+    const g = group("Erstveröffentlichung", "add", "neu", d.added);
+    if (g) body.append(g);
   } else if (d.added.length + d.removed.length + d.changed.length + d.updated.length === 0) {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "Keine Änderungen gegenüber dem Live-Stand — Veröffentlichen ist ein No-op.";
-    body.appendChild(p);
+    body.append(note("Keine Änderungen gegenüber dem Live-Stand — Veröffentlichen ist ein No-op.", "muted"));
   } else {
     const upd = d.updated.map((u) => `${u.modId}: ${u.oldFile} -> ${u.newFile}`);
     [
@@ -102,14 +132,12 @@ function renderPreview(res) {
       group("Geändert", "upd", "geändert", d.changed),
       group("Neu", "add", "neu", d.added),
       group("Entfernen", "rem", "entfernen", d.removed),
-    ].forEach((g) => g && body.appendChild(g));
+    ].forEach((g) => g && body.append(g));
   }
 
+  for (const w of res.warnings) body.append(note("⚠ " + w, "nomod"));
   if (res.noModId.length > 0) {
-    const note = document.createElement("p");
-    note.className = "nomod";
-    note.textContent = "Ohne modId (Dateiname-Identität): " + res.noModId.join(", ");
-    body.appendChild(note);
+    body.append(note("Ohne modId (Dateiname-Identität): " + res.noModId.join(", "), "nomod"));
   }
   resultCard.classList.remove("hidden");
 }
@@ -129,17 +157,16 @@ function updatePhase(phase) {
   progressText.textContent = text;
 }
 
-async function doPreview() {
+// `quiet`: refresh after publishing without replacing the publish message.
+async function doPreview({ quiet = false } = {}) {
   if (!invoke) return setStatus("Läuft nur in der Admin-App (Tauri).", "err");
-  const s = settings();
-  setStatus("Baue & vergleiche …", "busy");
+  if (!quiet) setStatus("Baue & vergleiche …", "busy");
+  publishBtn.disabled = true;
   try {
-    const res = await invoke("preview", {
-      instance: s.instance, channel: s.channel, baseUrl: s.baseUrl, pack: s.pack, ignore: ignoreLines(),
-    });
+    const res = await invoke("preview", { settings: settings() });
     renderPreview(res);
     publishBtn.disabled = false;
-    setStatus("Vorschau bereit — prüfen, dann veröffentlichen.", "ok");
+    if (!quiet) setStatus("Vorschau bereit — prüfen, dann veröffentlichen.", "ok");
   } catch (e) {
     setStatus("Fehler: " + e, "err");
   }
@@ -148,22 +175,20 @@ async function doPreview() {
 async function doPublish() {
   if (!invoke) return;
   const s = settings();
+  if (!s.sshHost || !s.remoteBase) return setStatus("SSH-Ziel und Remote-Basis angeben.", "err");
   setStatus("Veröffentliche … (Fenster offen lassen)", "busy");
   publishBtn.disabled = true;
   previewBtn.disabled = true;
   showProgress(true);
   try {
-    const res = await invoke("publish", {
-      instance: s.instance, channel: s.channel, baseUrl: s.baseUrl,
-      sshHost: s.sshHost, remoteBase: s.remoteBase, pack: s.pack,
-      ignore: ignoreLines(), gc: el("gc").checked,
-    });
-    let msg = `Veröffentlicht: ${res.files} Dateien, ${res.newBlobs} neue Blobs hochgeladen`;
+    const res = await invoke("publish", { settings: s });
+    let msg = `Veröffentlicht${res.signed ? " (signiert)" : ""}: ${res.files} Dateien, ${res.newBlobs} neue Blobs hochgeladen`;
     if (res.gcRemoved) msg += `, ${res.gcRemoved} lokal aufgeräumt`;
-    setStatus(msg + ".", "ok");
     showProgress(false);
     previewBtn.disabled = false;
-    await doPreview();
+    setStatus(msg + " Aktualisiere die Vorschau …", "ok");
+    await doPreview({ quiet: true });
+    setStatus(msg + ".", "ok");
   } catch (e) {
     setStatus("Fehler: " + e, "err");
     showProgress(false);
@@ -174,7 +199,7 @@ async function doPublish() {
 
 async function init() {
   loadSettings();
-  previewBtn.addEventListener("click", doPreview);
+  previewBtn.addEventListener("click", () => doPreview());
   publishBtn.addEventListener("click", doPublish);
   if (listen) await listen("publish-progress", (e) => updatePhase(e.payload));
   if (!invoke) setStatus("Vorschau-Modus (kein Tauri) — Aktionen inaktiv.", "");

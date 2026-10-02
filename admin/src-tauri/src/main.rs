@@ -4,7 +4,7 @@
 //! Bonegrader Admin (Tauri v2) — preview and publish channel updates. Thin GUI
 //! over the `bonegrader_publish` library (same logic as the CLI).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bonegrader_client::http::HttpFetcher;
 use bonegrader_client::session::fetch_manifest;
@@ -55,6 +55,16 @@ fn opt(s: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
+/// `~/x` -> `$HOME/x` (paths typed into the form never pass through a shell).
+fn expand_home(p: &str) -> PathBuf {
+    let p = p.trim();
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    match (p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")), home) {
+        (Some(rest), Some(h)) => PathBuf::from(h).join(rest),
+        _ => PathBuf::from(p),
+    }
+}
+
 impl Settings {
     fn build_options(&self) -> BuildOptions {
         BuildOptions {
@@ -79,7 +89,7 @@ impl Settings {
     }
 
     fn build(&self) -> anyhow::Result<Built> {
-        build_manifest(Path::new(self.instance.trim()), &self.build_options())
+        build_manifest(&expand_home(&self.instance), &self.build_options())
     }
 }
 
@@ -120,7 +130,7 @@ async fn preview(settings: Settings) -> Result<PreviewResult, String> {
     blocking(move || {
         let built = settings.build()?;
         if let Some(k) = opt(&settings.sign_key) {
-            load_signing_key(Path::new(&k))?; // fail early on a wrong key path
+            load_signing_key(&expand_home(&k))?; // fail early on a wrong key path
         }
         // Informational only: no signature check needed for the live diff.
         let live = fetch_manifest(&HttpFetcher::new(), settings.base_url.trim(), &[])
@@ -173,14 +183,14 @@ async fn publish(app: AppHandle, settings: Settings) -> Result<PublishResult, St
             let _ = app.emit(PROGRESS_EVENT, p);
         };
         let key = opt(&settings.sign_key)
-            .map(|k| load_signing_key(Path::new(&k)))
+            .map(|k| load_signing_key(&expand_home(&k)))
             .transpose()?;
 
         phase("build");
         let built = settings.build()?;
         let channel = built.manifest.channel.clone();
         let out = store_root.join(&channel);
-        let new_blobs = populate_store(Path::new(settings.instance.trim()), &out, &built.manifest)?;
+        let new_blobs = populate_store(&expand_home(&settings.instance), &out, &built.manifest)?;
         let bytes = write_manifest(&out, &built.manifest)?;
         let signature = out.join(bonegrader_core::sign::SIGNATURE_FILE);
         match &key {
