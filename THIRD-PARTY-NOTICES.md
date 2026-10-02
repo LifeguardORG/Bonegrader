@@ -5,9 +5,12 @@ required notices are reproduced below.
 
 ## Icons
 
-The wizard step icons in the client UI — **server**, **gear/settings** and
-**lightbulb** ([`app/ui/index.html`](app/ui/index.html)) — are based on the
-open-source **Feather Icons** / **Lucide** icon designs.
+The icons in the client UI — the wizard steps **server**, **folder** and
+**download** ([`app/ui/index.html`](app/ui/index.html)) and **alert-circle**,
+**alert-triangle**, **info** and **check-circle** in notices
+([`app/ui/main.js`](app/ui/main.js)), which the admin app reuses
+([`admin/ui/main.js`](admin/ui/main.js)) — are based on the open-source
+**Feather Icons** / **Lucide** icon designs.
 
 Everything else (the Bonegrader logo/bone-and-sword, its raster icons, and the
 decorative corner bee) is original artwork of this project and is not covered by
