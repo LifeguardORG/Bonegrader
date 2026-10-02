@@ -1,23 +1,21 @@
 //! `bonegrader` — headless updater.
 //!
-//! Wires the whole pipeline together over HTTP: scan the instance, fetch the
-//! manifest, compute the plan, and (with `update`) apply it. This is both a
-//! usable CLI and the reference flow the Tauri GUI will wrap.
+//! Runs the same pipeline as the desktop app ([`bonegrader_client::session`]):
+//! fetch and verify the manifest, scan the instance, show the plan, apply it —
+//! or undo the last update.
 
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use bonegrader_client::apply::apply;
-use bonegrader_client::exec::{finalize, Decisions};
-use bonegrader_client::http::{fetch_manifest, HttpFetcher};
-use bonegrader_core::diff::{compute_plan, UpdatePlan};
-use bonegrader_core::manifest::Category;
-use bonegrader_core::scan::scan_instance;
-use bonegrader_core::state::ClientState;
+use anyhow::{bail, Result};
+use bonegrader_client::apply::{ApplyOptions, Progress};
+use bonegrader_client::exec::Decisions;
+use bonegrader_client::http::HttpFetcher;
+use bonegrader_client::session::{
+    restorable, timestamp, trusted_keys, undo_last, ClientCompat, Prepared, SignatureStatus,
+    Updater,
+};
 use clap::{Args, Parser, Subcommand};
-use time::OffsetDateTime;
-
-const STATE_FILE: &str = ".bonegrader-state.json";
 
 #[derive(Parser)]
 #[command(name = "bonegrader", version, about = "Headless Bonegrader updater")]
@@ -32,6 +30,12 @@ enum Cmd {
     Plan(CommonArgs),
     /// Apply the update.
     Update(UpdateArgs),
+    /// Undo the last update: restore the replaced/removed files and the state.
+    Undo {
+        /// Instance/game directory (the folder that contains `mods/`).
+        #[arg(long)]
+        instance: PathBuf,
+    },
 }
 
 #[derive(Args)]
@@ -55,14 +59,19 @@ struct UpdateArgs {
     /// it (default: replace with the managed version).
     #[arg(long)]
     keep_collisions: bool,
+    /// Update even if the instance does not look like it belongs to this pack.
+    #[arg(long)]
+    force: bool,
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Plan(a) => {
-            let (plan, _, _) = prepare(&a)?;
-            print_plan(&plan);
-            if plan.is_noop() {
+            let fetcher = HttpFetcher::new();
+            let keys = trusted_keys()?;
+            let prepared = updater(&a, &fetcher, &keys).prepare()?;
+            print_plan(&prepared);
+            if prepared.is_noop() {
                 println!("\nAlready up to date.");
             } else {
                 println!("\n(plan only — run `update` to apply)");
@@ -70,82 +79,172 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Update(a) => run_update(a),
+        Cmd::Undo { instance } => {
+            let Some(r) = restorable(&instance) else {
+                bail!("Nothing to undo in {}.", instance.display());
+            };
+            println!(
+                "Undoing the update from {} ({} files)…",
+                r.timestamp, r.files
+            );
+            let report = undo_last(&instance, &timestamp())?;
+            println!(
+                "Done: {} files restored, {} files of that update set aside in {}.",
+                report.restored,
+                report.removed,
+                report.backup_dir.display()
+            );
+            Ok(())
+        }
     }
 }
 
-/// Scan + fetch manifest + compute plan.
-fn prepare(
-    a: &CommonArgs,
-) -> Result<(UpdatePlan, ClientState, bonegrader_core::manifest::Manifest)> {
-    if !a.instance.is_dir() {
-        anyhow::bail!("instance is not a directory: {}", a.instance.display());
+fn updater<'a>(
+    a: &'a CommonArgs,
+    fetcher: &'a HttpFetcher,
+    keys: &'a [bonegrader_core::sign::PublicKey],
+) -> Updater<'a> {
+    Updater {
+        instance: &a.instance,
+        base_url: &a.base_url,
+        fetcher,
+        keys,
     }
-    let categories = [Category::Mod, Category::Resourcepack, Category::Shaderpack];
-    let local = scan_instance(&a.instance, &categories)
-        .with_context(|| format!("scanning {}", a.instance.display()))?;
-    let manifest = fetch_manifest(&a.base_url)?;
-    let state = load_state(&a.instance)?;
-    let plan = compute_plan(&manifest, &local, &state);
-    Ok((plan, state, manifest))
 }
 
 fn run_update(a: UpdateArgs) -> Result<()> {
-    let (plan, state, manifest) = prepare(&a.common)?;
-    print_plan(&plan);
+    let fetcher = HttpFetcher::new();
+    let keys = trusted_keys()?;
+    let up = updater(&a.common, &fetcher, &keys);
+    let prepared = up.prepare()?;
+    print_plan(&prepared);
 
+    if prepared.assessment.suspicious && !a.force {
+        bail!("This instance does not look like it belongs to this pack (see above). Re-run with --force if it does.");
+    }
     let mut decisions = Decisions::default();
     if a.remove_extras {
-        decisions.remove_extras = plan.user_extras.iter().cloned().collect();
+        decisions.remove_extras = prepared.plan.user_extras.iter().cloned().collect();
     }
     if a.keep_collisions {
-        decisions.keep_collision_local = plan
+        decisions.keep_collision_local = prepared
+            .plan
             .collisions
             .iter()
             .map(|c| c.local_path.clone())
             .collect();
     }
-
-    let exec = finalize(&plan, &decisions);
-    if exec.downloads.is_empty() && exec.deletions.is_empty() {
+    if prepared.is_noop() && decisions.remove_extras.is_empty() {
         println!("\nNothing to apply.");
         return Ok(());
     }
 
-    let fetcher = HttpFetcher::new();
-    let report = apply(
-        &a.common.instance,
-        &manifest,
-        &exec,
-        &fetcher,
-        &a.common.base_url,
-        &state,
+    let outcome = up.apply(
+        &prepared,
+        &decisions,
+        &ApplyOptions::default(),
         &timestamp(),
+        &print_progress,
     )?;
-    save_state(&a.common.instance, &report.new_state)?;
-
+    eprintln!();
+    let r = &outcome.report;
     println!(
-        "\nApplied: {} downloaded, {} removed.",
-        report.downloaded, report.deleted
+        "\nApplied: {} installed ({} downloaded, {} reused), {} replaced, {} removed{}.",
+        r.installed,
+        r.downloaded,
+        r.reused,
+        r.replaced,
+        r.deleted,
+        if r.seeded > 0 {
+            format!(", {} config files created", r.seeded)
+        } else {
+            String::new()
+        }
     );
-    if let Some(b) = &report.backup_dir {
-        println!("Backup of replaced/removed files: {}", b.display());
+    if outcome.server_added {
+        println!("Added the server to the multiplayer list.");
+    }
+    if let Some(b) = &r.backup_dir {
+        println!("Backup: {}  (undo with `bonegrader undo`)", b.display());
+    }
+    for w in &r.warnings {
+        println!("warning: {w}");
     }
     Ok(())
 }
 
-fn print_plan(plan: &UpdatePlan) {
-    if plan.is_noop() && plan.user_extras.is_empty() {
+fn print_progress(p: &Progress) {
+    if p.phase == "download" && p.total_bytes > 0 {
+        let pct = p.done_bytes * 100 / p.total_bytes;
+        eprint!(
+            "\r  downloading {}/{} files, {pct}%   ",
+            p.done_files, p.total_files
+        );
+        let _ = std::io::stderr().flush();
+    }
+}
+
+fn print_plan(p: &Prepared) {
+    let m = &p.fetched.manifest;
+    println!(
+        "{} ({}) — {} {} for Minecraft {}{}",
+        m.pack_name,
+        m.channel,
+        m.loader.loader_type,
+        m.loader.loader_version,
+        m.loader.mc_version,
+        match p.fetched.signature {
+            SignatureStatus::Verified => ", signature verified",
+            SignatureStatus::NotRequired => "",
+        }
+    );
+    match &p.compat {
+        ClientCompat::Current => {}
+        ClientCompat::UpdateAvailable {
+            latest,
+            download_url,
+        } => println!(
+            "Note: Bonegrader {latest} is available{}.",
+            download_url
+                .as_deref()
+                .map(|u| format!(" ({u})"))
+                .unwrap_or_default()
+        ),
+        ClientCompat::UpdateRequired { min, download_url } => println!(
+            "This Bonegrader is too old for this pack — version {min} or newer is required{}.",
+            download_url
+                .as_deref()
+                .map(|u| format!(" ({u})"))
+                .unwrap_or_default()
+        ),
+    }
+    let a = &p.assessment;
+    if let Some(prev) = &a.previous_pack {
+        println!("WARNING: this instance was last updated to a different pack ({prev}).");
+    } else if a.suspicious {
+        println!(
+            "WARNING: only {} of the {} mods in this instance belong to the pack — is it the right instance?",
+            a.pack_mods, a.local_mods
+        );
+    }
+
+    let plan = &p.plan;
+    if p.is_noop() && plan.user_extras.is_empty() {
         println!("No changes.");
         return;
     }
     for d in &plan.downloads {
         match &d.replaces {
+            Some(old) if old == &d.entry.path => println!("  ~ update  {}", d.entry.path),
             Some(old) => println!("  ~ update  {}  (replaces {old})", d.entry.path),
             None => println!("  + install {}", d.entry.path),
         }
     }
     for r in &plan.removals {
         println!("  - remove  {r}");
+    }
+    for d in &plan.duplicates {
+        println!("  - remove  {d}  (identical copy of a pack file)");
     }
     for c in &plan.collisions {
         println!(
@@ -156,39 +255,16 @@ fn print_plan(plan: &UpdatePlan) {
     for e in &plan.user_extras {
         println!("  = keep    {e}  (your own mod)");
     }
-}
-
-fn load_state(instance: &Path) -> Result<ClientState> {
-    let path = instance.join(STATE_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => ClientState::from_json(&text).context("parsing state file"),
-        Err(_) => Ok(ClientState {
-            instance_path: instance.to_string_lossy().into(),
-            launcher_type: "manual".into(),
-            channel: "main".into(),
-            ..Default::default()
-        }),
+    for s in &p.seeds {
+        println!(
+            "  + create  {}  (default config, only because it is missing)",
+            s.path
+        );
     }
-}
-
-fn save_state(instance: &Path, state: &ClientState) -> Result<()> {
-    let path = instance.join(STATE_FILE);
-    let tmp = instance.join(format!("{STATE_FILE}.tmp"));
-    std::fs::write(&tmp, state.to_json_pretty()?)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
-}
-
-/// Filesystem-safe UTC timestamp for the backup dir (no ':' — Windows-safe).
-fn timestamp() -> String {
-    let n = OffsetDateTime::now_utc();
-    format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        n.year(),
-        u8::from(n.month()),
-        n.day(),
-        n.hour(),
-        n.minute(),
-        n.second()
-    )
+    if let Some(s) = &p.server {
+        println!(
+            "  + server  {} ({}) to the multiplayer list",
+            s.name, s.address
+        );
+    }
 }

@@ -14,6 +14,10 @@ path = "src/main.rs"
 bonegrader-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["env"] }
 time.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+zip = { workspace = true, features = ["deflate"] }

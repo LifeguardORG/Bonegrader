@@ -6,13 +6,27 @@
 //! profile itself; on top of that we upsert a dedicated profile so the pack's
 //! mods live in their own game directory instead of the shared `.minecraft`.
 
-use crate::apply::Fetcher;
+use crate::fetch::{is_not_found, Fetcher};
 use anyhow::{bail, Context, Result};
+use bonegrader_core::hash::{sha1_bytes, sha256_bytes};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 const NEOFORGE_MAVEN: &str = "https://maven.neoforged.net/releases/net/neoforged/neoforge";
+/// The real installer is a few MB.
+const INSTALLER_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// NeoForge versions look like `21.1.234` or `20.4.80-beta`. Only such plain
+/// strings are accepted, so a manipulated manifest cannot steer the download
+/// URL or the launcher profile anywhere else.
+pub fn is_valid_loader_version(v: &str) -> bool {
+    v.len() <= 64
+        && v.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        && !v.contains("..")
+}
 
 pub fn installer_url(loader_version: &str) -> String {
     format!("{NEOFORGE_MAVEN}/{loader_version}/neoforge-{loader_version}-installer.jar")
@@ -40,15 +54,29 @@ const fn java_exe() -> &'static str {
     }
 }
 
+/// A command that opens no console window on Windows (the app is a GUI).
+fn hidden_command(program: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 fn java_runs(exe: &Path) -> bool {
-    Command::new(exe)
+    hidden_command(exe)
         .arg("-version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// Locate a usable Java: `JAVA_HOME`, then `PATH`, then a launcher-bundled runtime.
+/// Locate a usable Java: `JAVA_HOME`, then `PATH`, then a launcher-bundled
+/// runtime (classic `.minecraft/runtime`, or the Microsoft Store launcher's).
 pub fn find_java(dotmc: &Path) -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("JAVA_HOME") {
         let exe = Path::new(&home).join("bin").join(java_exe());
@@ -60,7 +88,17 @@ pub fn find_java(dotmc: &Path) -> Option<PathBuf> {
     if java_runs(&on_path) {
         return Some(on_path);
     }
-    find_bundled_java(&dotmc.join("runtime"), 6)
+    let mut roots = vec![dotmc.join("runtime")];
+    if cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            roots.push(
+                PathBuf::from(local).join(
+                    "Packages/Microsoft.4297127D64EC6_8wekyb3d8bbwe/LocalCache/Local/runtime",
+                ),
+            );
+        }
+    }
+    roots.iter().find_map(|r| find_bundled_java(r, 6))
 }
 
 // Mojang stores runtimes at runtime/<name>/<os>/<name>/bin/java(.exe).
@@ -163,6 +201,36 @@ fn prune_duplicate_auto_profile(
     serde_json::to_string_pretty(&root).context("serializing launcher_profiles.json")
 }
 
+/// Check a downloaded installer: it must be a jar, and it must match the
+/// checksum the NeoForge Maven publishes next to it (`.sha256`, else `.sha1`).
+/// Without a published checksum, HTTPS and the jar check have to do.
+pub fn verify_installer(fetcher: &dyn Fetcher, url: &str, bytes: &[u8]) -> Result<()> {
+    if !bytes.starts_with(b"PK\x03\x04") {
+        bail!("{url} ist kein Jar – Download fehlerhaft");
+    }
+    type Digest = fn(&[u8]) -> String;
+    let checks: [(&str, Digest); 2] = [("sha256", sha256_bytes), ("sha1", sha1_bytes)];
+    for (ext, digest) in checks {
+        match fetcher.get_limited(&format!("{url}.{ext}"), 1024) {
+            Ok(body) => {
+                let text = String::from_utf8_lossy(&body);
+                let want = text
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if want != digest(bytes) {
+                    bail!("Prüfsumme des NeoForge-Installers stimmt nicht ({ext}) – Download beschädigt");
+                }
+                return Ok(());
+            }
+            Err(e) if is_not_found(&e) => continue,
+            Err(e) => return Err(e.context("Prüfsumme des NeoForge-Installers laden")),
+        }
+    }
+    Ok(())
+}
+
 /// Download the installer and run a headless client install into `dotmc`.
 pub fn run_installer(
     dotmc: &Path,
@@ -170,26 +238,52 @@ pub fn run_installer(
     fetcher: &dyn Fetcher,
     java: &Path,
 ) -> Result<()> {
+    if !is_valid_loader_version(loader_version) {
+        bail!("ungültige NeoForge-Version im Manifest: {loader_version}");
+    }
     let url = installer_url(loader_version);
     let bytes = fetcher
-        .get(&url)
-        .with_context(|| format!("downloading {url}"))?;
-    let jar = std::env::temp_dir().join(format!("neoforge-{loader_version}-installer.jar"));
-    std::fs::write(&jar, &bytes).context("writing installer to temp")?;
+        .get_limited(&url, INSTALLER_LIMIT)
+        .with_context(|| format!("NeoForge-Installer laden ({url})"))?;
+    verify_installer(fetcher, &url, &bytes)?;
 
-    let status = Command::new(java)
+    // A private, unpredictable temp folder (a fixed name in a shared /tmp
+    // could be swapped by another local user).
+    let dir = tempfile::Builder::new()
+        .prefix("bonegrader-neoforge-")
+        .tempdir()
+        .context("Temp-Ordner anlegen")?;
+    let jar = dir
+        .path()
+        .join(format!("neoforge-{loader_version}-installer.jar"));
+    std::fs::write(&jar, &bytes).context("Installer speichern")?;
+
+    let output = hidden_command(java)
         .arg("-jar")
         .arg(&jar)
         .arg("--install-client")
         .arg(dotmc)
-        .status()
-        .with_context(|| format!("running the installer with {}", java.display()))?;
-    let _ = std::fs::remove_file(&jar);
-
-    if !status.success() {
-        bail!("NeoForge installer failed (exit {:?})", status.code());
+        .output()
+        .with_context(|| format!("Installer mit {} starten", java.display()))?;
+    if !output.status.success() {
+        bail!(
+            "NeoForge-Installer fehlgeschlagen (Exit-Code {:?}). Letzte Ausgabe:\n{}",
+            output.status.code(),
+            output_tail(&output, 15)
+        );
     }
     Ok(())
+}
+
+/// The last `n` lines of a process's stdout + stderr.
+fn output_tail(output: &Output, n: usize) -> String {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 /// Ensure the NeoForge client is installed *and* that a dedicated launcher
@@ -214,6 +308,9 @@ pub fn ensure_client(
     game_dir: &Path,
     created: &str,
 ) -> Result<bool> {
+    if !is_valid_loader_version(loader_version) {
+        bail!("ungültige NeoForge-Version im Manifest: {loader_version}");
+    }
     let ran_installer = if is_installed(dotmc, loader_version) {
         false
     } else {
@@ -247,6 +344,56 @@ pub fn ensure_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Maven(std::collections::HashMap<String, Vec<u8>>);
+    impl Fetcher for Maven {
+        fn open(&self, url: &str) -> Result<Box<dyn std::io::Read + Send>> {
+            match self.0.get(url) {
+                Some(b) => Ok(Box::new(std::io::Cursor::new(b.clone()))),
+                None => Err(crate::fetch::HttpStatus {
+                    code: 404,
+                    url: url.into(),
+                }
+                .into()),
+            }
+        }
+    }
+
+    #[test]
+    fn validates_loader_versions() {
+        assert!(is_valid_loader_version("21.1.234"));
+        assert!(is_valid_loader_version("20.4.80-beta"));
+        assert!(!is_valid_loader_version(""));
+        assert!(!is_valid_loader_version("../../evil"));
+        assert!(!is_valid_loader_version("21.1.234/../../x"));
+        assert!(!is_valid_loader_version("21.1 234"));
+        assert!(!is_valid_loader_version("-21"));
+    }
+
+    #[test]
+    fn verifies_installer_checksums() {
+        let url = "https://maven/x/installer.jar";
+        let jar = b"PK\x03\x04 installer bytes".to_vec();
+        let mut files = std::collections::HashMap::new();
+
+        // No checksum published: the jar check alone passes.
+        assert!(verify_installer(&Maven(files.clone()), url, &jar).is_ok());
+        assert!(verify_installer(&Maven(files.clone()), url, b"<html>404</html>").is_err());
+
+        // Matching .sha1 (no .sha256).
+        files.insert(
+            format!("{url}.sha1"),
+            format!("{}  installer.jar\n", sha1_bytes(&jar)).into_bytes(),
+        );
+        assert!(verify_installer(&Maven(files.clone()), url, &jar).is_ok());
+
+        // .sha256 takes precedence and must match.
+        files.insert(format!("{url}.sha256"), b"0000".to_vec());
+        let err = verify_installer(&Maven(files.clone()), url, &jar).unwrap_err();
+        assert!(format!("{err:#}").contains("sha256"), "{err:#}");
+        files.insert(format!("{url}.sha256"), sha256_bytes(&jar).into_bytes());
+        assert!(verify_installer(&Maven(files), url, &jar).is_ok());
+    }
 
     #[test]
     fn builds_installer_url() {

@@ -1,21 +1,25 @@
 //! Discover Minecraft instances the player might update.
 //!
-//! Two sources are supported automatically — CurseForge app instances (each a
-//! folder with a `minecraftinstance.json`) and official-launcher profiles (from
+//! Three sources are supported automatically — CurseForge app instances (each
+//! a folder with a `minecraftinstance.json`), Prism Launcher instances
+//! (`instance.cfg` + `mmc-pack.json`) and official-launcher profiles (from
 //! `.minecraft/launcher_profiles.json`) — plus a manual folder pick in the UI.
 //!
-//! The parsing functions ([`parse_curseforge_instance`], [`parse_launcher_profiles`])
-//! are pure and unit-tested; the `discover_*`/`default_*` helpers wrap them with
-//! best-effort, platform-specific path guesses. Auto-detection is never trusted
-//! blindly: the caller still sanity-checks the chosen instance against the
-//! manifest before binding.
+//! The parsing functions ([`parse_curseforge_instance`], [`parse_prism_instance`],
+//! [`parse_launcher_profiles`]) are pure and unit-tested; the `discover_*` /
+//! `default_*` helpers wrap them with best-effort, platform-specific path
+//! guesses. Auto-detection is never trusted blindly: the plan carries an
+//! [`InstanceAssessment`](bonegrader_core::diff::InstanceAssessment) and the UI
+//! warns before updating an instance that doesn't look like the pack.
 
+use bonegrader_core::launcher::parse_curseforge_instance as parse_cf;
 use std::path::{Path, PathBuf};
 
 /// Which launcher an instance belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum LauncherKind {
     CurseForge,
+    Prism,
     Vanilla,
     Manual,
 }
@@ -39,34 +43,100 @@ pub struct DetectedInstance {
 
 /// Parse a CurseForge `minecraftinstance.json`. `dir` is the instance folder.
 pub fn parse_curseforge_instance(dir: &Path, json: &str) -> Option<DetectedInstance> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let name = v.get("name").and_then(|x| x.as_str())?.to_string();
-    let bml = v.get("baseModLoader");
-    let mc_version = v
-        .get("gameVersion")
-        .and_then(|x| x.as_str())
-        .or_else(|| {
-            bml.and_then(|b| b.get("minecraftVersion"))
-                .and_then(|x| x.as_str())
-        })
-        .map(String::from);
-    let loader_version = bml
-        .and_then(|b| b.get("forgeVersion"))
-        .and_then(|x| x.as_str())
-        .map(String::from);
-    let loader_type = bml
-        .and_then(|b| b.get("name"))
-        .and_then(|x| x.as_str())
-        .map(|n| loader_type_from_name(n).to_string());
+    let cf = parse_cf(json)?;
     Some(DetectedInstance {
-        name,
+        name: cf.name.clone()?,
         path: dir.to_path_buf(),
         launcher: LauncherKind::CurseForge,
-        mc_version,
-        loader_type,
-        loader_version,
+        mc_version: cf.mc_version.clone(),
+        loader_type: cf.loader_type().map(str::to_string),
+        loader_version: cf.loader_version,
         profile_key: None,
     })
+}
+
+/// Name, Minecraft version and loader of a Prism Launcher instance, from its
+/// `instance.cfg` (INI) and `mmc-pack.json` (component list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrismInstance {
+    pub name: String,
+    pub mc_version: Option<String>,
+    pub loader_type: Option<String>,
+    pub loader_version: Option<String>,
+}
+
+pub fn parse_prism_instance(instance_cfg: &str, mmc_pack: Option<&str>) -> Option<PrismInstance> {
+    let name = instance_cfg
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("name="))
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())?;
+    let mut inst = PrismInstance {
+        name,
+        mc_version: None,
+        loader_type: None,
+        loader_version: None,
+    };
+    let pack: serde_json::Value = mmc_pack
+        .and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or_default();
+    for c in pack
+        .get("components")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let version = c.get("version").and_then(|v| v.as_str()).map(String::from);
+        let loader = match c.get("uid").and_then(|u| u.as_str()).unwrap_or("") {
+            "net.minecraft" => {
+                inst.mc_version = version;
+                continue;
+            }
+            "net.neoforged" => "neoforge",
+            "net.minecraftforge" => "forge",
+            "net.fabricmc.fabric-loader" => "fabric",
+            "org.quiltmc.quilt-loader" => "quilt",
+            _ => continue,
+        };
+        inst.loader_type = Some(loader.to_string());
+        inst.loader_version = version;
+    }
+    Some(inst)
+}
+
+/// Scan a Prism Launcher `instances` folder.
+pub fn scan_prism_instances(root: &Path) -> Vec<DetectedInstance> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Ok(cfg) = std::fs::read_to_string(dir.join("instance.cfg")) else {
+            continue;
+        };
+        let pack = std::fs::read_to_string(dir.join("mmc-pack.json")).ok();
+        let Some(p) = parse_prism_instance(&cfg, pack.as_deref()) else {
+            continue;
+        };
+        // The game directory is `.minecraft` or (newer instances) `minecraft`.
+        let game_dir = [".minecraft", "minecraft"]
+            .iter()
+            .map(|d| dir.join(d))
+            .find(|d| d.is_dir())
+            .unwrap_or_else(|| dir.join(".minecraft"));
+        out.push(DetectedInstance {
+            name: p.name,
+            path: game_dir,
+            launcher: LauncherKind::Prism,
+            mc_version: p.mc_version,
+            loader_type: p.loader_type,
+            loader_version: p.loader_version,
+            profile_key: None,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// Scan a CurseForge Instances root for instance folders.
@@ -140,6 +210,9 @@ pub fn discover_all() -> Vec<DetectedInstance> {
     for root in default_curseforge_roots() {
         out.extend(scan_curseforge_instances(&root));
     }
+    for root in default_prism_roots() {
+        out.extend(scan_prism_instances(&root));
+    }
     if let Some(dotmc) = default_dotminecraft() {
         if let Ok(text) = std::fs::read_to_string(dotmc.join("launcher_profiles.json")) {
             out.extend(parse_launcher_profiles(&text, &dotmc));
@@ -164,6 +237,34 @@ pub fn default_curseforge_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// Candidate Prism Launcher `instances` folders for the current OS/user
+/// (including the Flatpak location on Linux).
+pub fn default_prism_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if cfg!(target_os = "windows") {
+        if let Some(a) = std::env::var_os("APPDATA") {
+            roots.push(PathBuf::from(a).join("PrismLauncher/instances"));
+        }
+    } else if cfg!(target_os = "macos") {
+        if let Some(h) = home_dir() {
+            roots.push(h.join("Library/Application Support/PrismLauncher/instances"));
+        }
+    } else {
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|h| h.join(".local/share")));
+        if let Some(d) = data {
+            roots.push(d.join("PrismLauncher/instances"));
+        }
+        if let Some(h) = home_dir() {
+            roots.push(
+                h.join(".var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances"),
+            );
+        }
+    }
+    roots
+}
+
 /// The default `.minecraft` directory for the current OS.
 pub fn default_dotminecraft() -> Option<PathBuf> {
     if cfg!(target_os = "windows") {
@@ -179,22 +280,6 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-}
-
-fn loader_type_from_name(name: &str) -> &'static str {
-    let n = name.to_ascii_lowercase();
-    // Order matters: "neoforge" also contains "forge".
-    if n.contains("neoforge") {
-        "neoforge"
-    } else if n.contains("fabric") {
-        "fabric"
-    } else if n.contains("quilt") {
-        "quilt"
-    } else if n.contains("forge") {
-        "forge"
-    } else {
-        "neoforge"
-    }
 }
 
 /// Interpret a launcher `lastVersionId` into
@@ -360,6 +445,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(f.loader_type.as_deref(), Some("forge"));
+    }
+
+    #[test]
+    fn parses_prism_instances() {
+        let cfg = "[General]\nInstanceType=OneSix\nname=BonesAndBees\niconKey=default\n";
+        let pack = r#"{"components":[
+            {"uid":"org.lwjgl3","version":"3.3.3"},
+            {"uid":"net.minecraft","version":"1.21.1"},
+            {"uid":"net.neoforged","version":"21.1.234"}
+        ],"formatVersion":1}"#;
+        let p = parse_prism_instance(cfg, Some(pack)).unwrap();
+        assert_eq!(p.name, "BonesAndBees");
+        assert_eq!(p.mc_version.as_deref(), Some("1.21.1"));
+        assert_eq!(p.loader_type.as_deref(), Some("neoforge"));
+        assert_eq!(p.loader_version.as_deref(), Some("21.1.234"));
+
+        let vanilla = parse_prism_instance("name=Plain", None).unwrap();
+        assert_eq!(vanilla.loader_type, None);
+        assert!(
+            parse_prism_instance("InstanceType=OneSix", None).is_none(),
+            "needs a name"
+        );
+    }
+
+    #[test]
+    fn scans_prism_folders_and_finds_the_game_dir() {
+        let dir = std::env::temp_dir().join(format!("bg-prism-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("A/minecraft")).unwrap();
+        std::fs::write(dir.join("A/instance.cfg"), "name=Alpha\n").unwrap();
+        std::fs::create_dir_all(dir.join("B")).unwrap(); // no instance.cfg -> ignored
+        let found = scan_prism_instances(&dir);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].launcher, LauncherKind::Prism);
+        assert_eq!(found[0].path, dir.join("A/minecraft"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

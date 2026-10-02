@@ -1,0 +1,17 @@
+# Öffentliche Schlüssel, mit denen manifest.json signiert sein muss.
+#
+# Eine Zeile pro Schlüssel (64 Hex-Zeichen), Kommentare mit '#'. Der Client
+# wird mit diesen Schlüsseln gebaut und akzeptiert danach nur noch Manifeste
+# mit gültiger Signatur (manifest.json.sig). Solange hier kein Schlüssel steht,
+# ist die Prüfung aus.
+#
+# Einrichten (einmalig, auf dem Rechner des Admins):
+#   cargo run -p bonegrader-publish -- keygen \
+#     --secret-out ~/.config/bonegrader/manifest-signing.key \
+#     --public-out keys/manifest-signing.pub
+# Danach beim Veröffentlichen --sign-key <pfad> angeben, die Datei hier
+# committen und einen neuen Client-Release bauen. Reihenfolge beachten:
+# erst signiert veröffentlichen, dann den Client mit Schlüssel ausliefern.
+#
+# Schlüsselwechsel: neuen Schlüssel zusätzlich eintragen, Client ausliefern,
+# mit dem neuen Schlüssel signieren, alten Eintrag später entfernen.

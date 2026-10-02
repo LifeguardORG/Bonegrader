@@ -4,6 +4,7 @@
 
 # Tauri: generated schemas/artifacts (regenerated on build)
 /app/src-tauri/gen
+/admin/src-tauri/gen
 
 # Bonegrader runtime artifacts (created inside target instances, not this repo)
 .bonegrader-backup/

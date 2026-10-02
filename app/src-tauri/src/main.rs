@@ -3,154 +3,278 @@
 
 //! Bonegrader desktop app (Tauri v2).
 //!
-//! The GUI is intentionally thin: three commands wrap the exact same core
-//! pipeline the headless CLI uses. Blocking work (HTTP, hashing, filesystem)
-//! runs off the UI thread via `spawn_blocking`, and download/apply progress is
-//! streamed to the frontend through the `update-progress` event.
+//! The GUI is intentionally thin: every command wraps the same pipeline the
+//! headless CLI uses ([`bonegrader_client::session`]). Blocking work (HTTP,
+//! hashing, filesystem) runs off the UI thread via `spawn_blocking`, and
+//! download/apply progress is streamed to the frontend through the
+//! `update-progress` event. Errors reach the UI with their full cause chain.
 
 use std::path::{Path, PathBuf};
 
-use bonegrader_client::apply::{apply_with_progress, Progress};
-use bonegrader_client::detect::{default_dotminecraft, discover_all, DetectedInstance};
-use bonegrader_client::exec::{finalize, Decisions};
-use bonegrader_client::http::{fetch_manifest, HttpFetcher};
+use bonegrader_client::apply::{ApplyOptions, Progress};
+use bonegrader_client::detect::{
+    default_dotminecraft, discover_all, DetectedInstance, LauncherKind,
+};
+use bonegrader_client::exec::Decisions;
+use bonegrader_client::fetch::check_url;
+use bonegrader_client::http::HttpFetcher;
 use bonegrader_client::install;
-use bonegrader_core::diff::{compute_plan, UpdatePlan};
-use bonegrader_core::manifest::Category;
-use bonegrader_core::scan::scan_instance;
-use bonegrader_core::state::ClientState;
+use bonegrader_client::session::{
+    client_compat, fetch_manifest, now_rfc3339, restorable, timestamp, trusted_keys, undo_last,
+    ClientCompat, FetchedManifest, Restorable, SignatureStatus, StaleManifest, Updater,
+    CLIENT_VERSION,
+};
+use bonegrader_core::manifest::{Loader, ServerInfo};
+use bonegrader_core::paths::is_safe_component;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
-const STATE_FILE: &str = ".bonegrader-state.json";
 const PROGRESS_EVENT: &str = "update-progress";
-const CATEGORIES: [Category; 3] = [Category::Mod, Category::Resourcepack, Category::Shaderpack];
+/// Prefix of the error the UI answers with a fresh check (see `main.js`).
+const STALE_PREFIX: &str = "[stale] ";
+
+/// UI-facing error: the whole `anyhow` chain ("context: cause: cause"). A
+/// plan that went stale is marked so the UI can re-check automatically.
+fn err(e: anyhow::Error) -> String {
+    if e.downcast_ref::<StaleManifest>().is_some() {
+        format!("{STALE_PREFIX}{e}")
+    } else {
+        format!("{e:#}")
+    }
+}
+
+/// Run blocking work off the UI thread.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)
+}
+
+fn fetch(base_url: &str) -> anyhow::Result<FetchedManifest> {
+    fetch_manifest(&HttpFetcher::new(), base_url, &trusted_keys()?)
+}
+
+#[tauri::command]
+fn app_version() -> &'static str {
+    CLIENT_VERSION
+}
+
+/// Open a download page in the system browser (HTTPS only).
+#[tauri::command]
+fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    check_url(&url).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
 
 /// List every instance we can auto-detect.
 #[tauri::command]
-fn detect_instances() -> Vec<DetectedInstance> {
-    discover_all()
+async fn detect_instances() -> Result<Vec<DetectedInstance>, String> {
+    blocking(|| Ok(discover_all())).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManifestInfo {
+    pack_name: String,
+    channel: String,
+    generated_at: String,
+    loader: Loader,
+    signature: SignatureStatus,
+    compat: ClientCompat,
+    server: Option<ServerInfo>,
+    files: usize,
+}
+
+/// Check the channel URL and describe what it publishes.
+#[tauri::command]
+async fn manifest_info(base_url: String) -> Result<ManifestInfo, String> {
+    blocking(move || {
+        let f = fetch(&base_url)?;
+        let m = f.manifest;
+        Ok(ManifestInfo {
+            compat: client_compat(m.client.as_ref(), CLIENT_VERSION),
+            pack_name: m.pack_name,
+            channel: m.channel,
+            generated_at: m.generated_at,
+            loader: m.loader,
+            signature: f.signature,
+            server: m.server,
+            files: m.files.len(),
+        })
+    })
+    .await
 }
 
 /// Compute (but don't apply) the update for an instance against a channel.
+/// Returns the plan view plus the update that could be undone, if any.
 #[tauri::command]
-async fn plan_update(instance: String, base_url: String) -> Result<UpdatePlan, String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<UpdatePlan, String> {
+async fn plan_update(instance: String, base_url: String) -> Result<serde_json::Value, String> {
+    blocking(move || {
         let inst = PathBuf::from(&instance);
-        let local = scan_instance(&inst, &CATEGORIES).map_err(|e| e.to_string())?;
-        let manifest = fetch_manifest(&base_url).map_err(|e| e.to_string())?;
-        let state = load_state(&inst).map_err(|e| e.to_string())?;
-        Ok(compute_plan(&manifest, &local, &state))
+        let fetcher = HttpFetcher::new();
+        let keys = trusted_keys()?;
+        let up = Updater {
+            instance: &inst,
+            base_url: &base_url,
+            fetcher: &fetcher,
+            keys: &keys,
+        };
+        let prepared = up.prepare()?;
+        let mut view = serde_json::to_value(prepared.view())?;
+        view["restorable"] = serde_json::to_value(restorable(&inst))?;
+        Ok(view)
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApplyResult {
+    installed: usize,
     downloaded: usize,
+    reused: usize,
+    replaced: usize,
     deleted: usize,
+    seeded: usize,
+    server_added: bool,
     backup_dir: Option<String>,
+    warnings: Vec<String>,
 }
 
-/// Apply the update with the user's extra/collision decisions.
+/// Apply the update with the player's decisions — only if the server still
+/// publishes the manifest the player reviewed (`manifest_id`).
 #[tauri::command]
 async fn apply_update(
     app: AppHandle,
     instance: String,
     base_url: String,
+    manifest_id: String,
     remove_extras: Vec<String>,
     keep_collisions: Vec<String>,
 ) -> Result<ApplyResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        run_apply(
-            &app,
-            &PathBuf::from(&instance),
-            &base_url,
-            remove_extras,
-            keep_collisions,
-        )
-        .map_err(|e| e.to_string())
+    blocking(move || {
+        let inst = PathBuf::from(&instance);
+        let fetcher = HttpFetcher::new();
+        let keys = trusted_keys()?;
+        let up = Updater {
+            instance: &inst,
+            base_url: &base_url,
+            fetcher: &fetcher,
+            keys: &keys,
+        };
+        let decisions = Decisions {
+            remove_extras: remove_extras.into_iter().collect(),
+            keep_collision_local: keep_collisions.into_iter().collect(),
+        };
+        let progress = |p: &Progress| {
+            let _ = app.emit(PROGRESS_EVENT, p);
+        };
+        let outcome = up.apply_checked(
+            Some(&manifest_id),
+            &decisions,
+            &ApplyOptions::default(),
+            &timestamp(),
+            &progress,
+        )?;
+        let r = outcome.report;
+        Ok(ApplyResult {
+            installed: r.installed,
+            downloaded: r.downloaded,
+            reused: r.reused,
+            replaced: r.replaced,
+            deleted: r.deleted,
+            seeded: r.seeded,
+            server_added: outcome.server_added,
+            backup_dir: r.backup_dir.map(|p| p.display().to_string()),
+            warnings: r.warnings,
+        })
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
-fn run_apply(
-    app: &AppHandle,
-    inst: &Path,
-    base_url: &str,
-    remove_extras: Vec<String>,
-    keep_collisions: Vec<String>,
-) -> anyhow::Result<ApplyResult> {
-    let local = scan_instance(inst, &CATEGORIES)?;
-    let manifest = fetch_manifest(base_url)?;
-    let state = load_state(inst)?;
-    let plan = compute_plan(&manifest, &local, &state);
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UndoResult {
+    restored: usize,
+    removed: usize,
+    backup_dir: String,
+    next: Option<Restorable>,
+}
 
-    let decisions = Decisions {
-        remove_extras: remove_extras.into_iter().collect(),
-        keep_collision_local: keep_collisions.into_iter().collect(),
-    };
-    let exec = finalize(&plan, &decisions);
-    let fetcher = HttpFetcher::new();
-
-    let progress = |p: &Progress| {
-        let _ = app.emit(PROGRESS_EVENT, p);
-    };
-    let report = apply_with_progress(
-        inst,
-        &manifest,
-        &exec,
-        &fetcher,
-        base_url,
-        &state,
-        &timestamp(),
-        &progress,
-    )?;
-    save_state(inst, &report.new_state)?;
-
-    Ok(ApplyResult {
-        downloaded: report.downloaded,
-        deleted: report.deleted,
-        backup_dir: report.backup_dir.map(|p| p.display().to_string()),
+/// Undo the last update of an instance.
+#[tauri::command]
+async fn undo_update(instance: String) -> Result<UndoResult, String> {
+    blocking(move || {
+        let inst = PathBuf::from(&instance);
+        let r = undo_last(&inst, &timestamp())?;
+        Ok(UndoResult {
+            restored: r.restored,
+            removed: r.removed,
+            backup_dir: r.backup_dir.display().to_string(),
+            next: restorable(&inst),
+        })
     })
+    .await
 }
 
-fn load_state(instance: &Path) -> anyhow::Result<ClientState> {
-    match std::fs::read_to_string(instance.join(STATE_FILE)) {
-        Ok(text) => Ok(ClientState::from_json(&text)?),
-        Err(_) => Ok(ClientState {
-            instance_path: instance.to_string_lossy().into(),
-            launcher_type: "manual".into(),
-            channel: "main".into(),
-            ..Default::default()
-        }),
-    }
+/// Native folder picker (instead of typing a path).
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    blocking(move || {
+        Ok(app
+            .dialog()
+            .file()
+            .blocking_pick_folder()
+            .and_then(|f| f.into_path().ok())
+            .map(|p| p.display().to_string()))
+    })
+    .await
 }
 
-fn save_state(instance: &Path, state: &ClientState) -> anyhow::Result<()> {
-    let tmp = instance.join(format!("{STATE_FILE}.tmp"));
-    std::fs::write(&tmp, state.to_json_pretty()?)?;
-    std::fs::rename(&tmp, instance.join(STATE_FILE))?;
-    Ok(())
-}
-
-/// Filesystem-safe UTC timestamp for the backup dir (no ':' — Windows-safe).
-fn timestamp() -> String {
-    let n = OffsetDateTime::now_utc();
-    format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        n.year(),
-        u8::from(n.month()),
-        n.day(),
-        n.hour(),
-        n.minute(),
-        n.second()
-    )
+/// Create a dedicated game folder for the pack under the official launcher's
+/// `.minecraft` (instead of mixing the pack's mods into `.minecraft/mods`).
+/// Installing NeoForge then binds a launcher profile to it.
+#[tauri::command]
+async fn create_instance(pack_name: String) -> Result<DetectedInstance, String> {
+    blocking(move || {
+        let dotmc = default_dotminecraft()
+            .ok_or_else(|| anyhow::anyhow!(".minecraft-Ordner nicht gefunden"))?;
+        let folder: String = pack_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-_ ".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let folder = folder.trim();
+        let folder = if is_safe_component(folder) {
+            folder
+        } else {
+            "Bonegrader"
+        };
+        let path = dotmc.join("bonegrader").join(folder);
+        std::fs::create_dir_all(path.join("mods"))?;
+        Ok(DetectedInstance {
+            name: pack_name.clone(),
+            path,
+            launcher: LauncherKind::Vanilla,
+            mc_version: None,
+            loader_type: None,
+            loader_version: None,
+            profile_key: None,
+        })
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -178,10 +302,10 @@ struct LoaderStatus {
 /// Compare the selected instance's loader against the pack's required loader.
 ///
 /// This runs for *every* launcher type, so a wrong or missing NeoForge version
-/// is reported instead of silently ignored — including for CurseForge and
-/// manually-picked instances. Bonegrader can only auto-install for the vanilla
-/// (official launcher) + NeoForge path; elsewhere it just flags the mismatch so
-/// the player can fix it in their launcher.
+/// is reported instead of silently ignored — including for CurseForge, Prism
+/// and manually-picked instances. Bonegrader can only auto-install for the
+/// vanilla (official launcher) + NeoForge path; elsewhere it just flags the
+/// mismatch so the player can fix it in their launcher.
 #[tauri::command]
 async fn loader_status(
     base_url: String,
@@ -189,8 +313,8 @@ async fn loader_status(
     loader_type: Option<String>,
     loader_version: Option<String>,
 ) -> Result<LoaderStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<LoaderStatus, String> {
-        let required = fetch_manifest(&base_url).map_err(|e| e.to_string())?.loader;
+    blocking(move || {
+        let required = fetch(&base_url)?.manifest.loader;
 
         let is_vanilla = launcher.eq_ignore_ascii_case("vanilla");
         let required_neoforge = required.loader_type.eq_ignore_ascii_case("neoforge");
@@ -247,7 +371,6 @@ async fn loader_status(
         })
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Install the pack's NeoForge version and bind a launcher profile to it. When
@@ -261,14 +384,10 @@ async fn install_loader(
     pack_name: String,
     profile_key: Option<String>,
 ) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
-        let dotmc =
-            default_dotminecraft().ok_or_else(|| ".minecraft-Ordner nicht gefunden".to_string())?;
-        let loader_version = fetch_manifest(&base_url)
-            .map_err(|e| e.to_string())?
-            .loader
-            .loader_version;
-        let fetcher = HttpFetcher::new();
+    blocking(move || {
+        let dotmc = default_dotminecraft()
+            .ok_or_else(|| anyhow::anyhow!(".minecraft-Ordner nicht gefunden"))?;
+        let loader_version = fetch(&base_url)?.manifest.loader.loader_version;
         let key = profile_key
             .as_deref()
             .filter(|k| !k.is_empty())
@@ -276,30 +395,30 @@ async fn install_loader(
         install::ensure_client(
             &dotmc,
             &loader_version,
-            &fetcher,
+            &HttpFetcher::new(),
             key,
             &pack_name,
             Path::new(&game_dir),
-            &now_iso(),
+            &now_rfc3339(),
         )
-        .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
-}
-
-fn now_iso() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_default()
 }
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            app_version,
+            open_url,
             detect_instances,
+            manifest_info,
             plan_update,
             apply_update,
+            undo_update,
+            pick_folder,
+            create_instance,
             loader_status,
             install_loader
         ])

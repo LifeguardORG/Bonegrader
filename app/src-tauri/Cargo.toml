@@ -11,9 +11,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-time.workspace = true
 bonegrader-core = { path = "../../crates/core" }
 bonegrader-client = { path = "../../crates/client", features = ["http"] }

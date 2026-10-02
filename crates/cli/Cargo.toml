@@ -15,4 +15,3 @@ bonegrader-core = { path = "../core" }
 bonegrader-client = { path = "../client", features = ["http"] }
 anyhow.workspace = true
 clap.workspace = true
-time.workspace = true

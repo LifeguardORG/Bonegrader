@@ -14,7 +14,7 @@
 //!   the file name).
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 
 /// Mod identity extracted from a jar.
@@ -35,12 +35,16 @@ impl ModInfo {
 /// Read mod identity from a jar. Returns `None` for jars without recognisable
 /// mod metadata (e.g. pure libraries).
 pub fn read_mod_info(jar_path: &Path) -> Option<ModInfo> {
-    let file = File::open(jar_path).ok()?;
-    let mut zip = zip::ZipArchive::new(file).ok()?;
+    read_mod_info_from(File::open(jar_path).ok()?)
+}
+
+/// Like [`read_mod_info`], for any seekable jar (e.g. an in-memory buffer).
+pub fn read_mod_info_from<R: Read + Seek>(jar: R) -> Option<ModInfo> {
+    let mut zip = zip::ZipArchive::new(jar).ok()?;
     read_mod_info_from_zip(&mut zip)
 }
 
-fn read_mod_info_from_zip(zip: &mut zip::ZipArchive<File>) -> Option<ModInfo> {
+fn read_mod_info_from_zip<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Option<ModInfo> {
     let toml_str = read_zip_text(zip, "META-INF/neoforge.mods.toml")
         .or_else(|| read_zip_text(zip, "META-INF/mods.toml"))?;
 
@@ -76,14 +80,14 @@ fn read_mod_info_from_zip(zip: &mut zip::ZipArchive<File>) -> Option<ModInfo> {
     Some(ModInfo { mod_ids, version })
 }
 
-fn read_zip_text(zip: &mut zip::ZipArchive<File>, name: &str) -> Option<String> {
+fn read_zip_text<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
     let mut f = zip.by_name(name).ok()?;
     let mut s = String::new();
     f.read_to_string(&mut s).ok()?;
     Some(s)
 }
 
-fn manifest_impl_version(zip: &mut zip::ZipArchive<File>) -> Option<String> {
+fn manifest_impl_version<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Option<String> {
     let text = read_zip_text(zip, "META-INF/MANIFEST.MF")?;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Implementation-Version:") {
@@ -94,4 +98,127 @@ fn manifest_impl_version(zip: &mut zip::ZipArchive<File>) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    /// Build an in-memory jar with the given `(entry name, content)` pairs.
+    pub(crate) fn jar(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, content) in entries {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn info(entries: &[(&str, &str)]) -> Option<ModInfo> {
+        read_mod_info_from(Cursor::new(jar(entries)))
+    }
+
+    #[test]
+    fn reads_neoforge_mods_toml() {
+        let mi = info(&[(
+            "META-INF/neoforge.mods.toml",
+            "modLoader=\"javafml\"\nloaderVersion=\"[4,)\"\n[[mods]]\nmodId=\"create\"\nversion=\"6.0.10\"\n",
+        )])
+        .unwrap();
+        assert_eq!(mi.mod_ids, vec!["create".to_string()]);
+        assert_eq!(mi.primary_id(), Some("create"));
+        assert_eq!(mi.version.as_deref(), Some("6.0.10"));
+    }
+
+    #[test]
+    fn falls_back_to_legacy_mods_toml_and_prefers_neoforge() {
+        let legacy = info(&[(
+            "META-INF/mods.toml",
+            "[[mods]]\nmodId=\"jei\"\nversion=\"19.0\"\n",
+        )])
+        .unwrap();
+        assert_eq!(legacy.mod_ids, vec!["jei".to_string()]);
+
+        let both = info(&[
+            ("META-INF/mods.toml", "[[mods]]\nmodId=\"old\"\n"),
+            ("META-INF/neoforge.mods.toml", "[[mods]]\nmodId=\"new\"\n"),
+        ])
+        .unwrap();
+        assert_eq!(both.mod_ids, vec!["new".to_string()]);
+    }
+
+    #[test]
+    fn resolves_placeholder_version_from_jar_manifest() {
+        let mi = info(&[
+            (
+                "META-INF/neoforge.mods.toml",
+                "[[mods]]\nmodId=\"sodium\"\nversion=\"${file.jarVersion}\"\n",
+            ),
+            (
+                "META-INF/MANIFEST.MF",
+                "Manifest-Version: 1.0\r\nImplementation-Version: 0.6.5\r\n",
+            ),
+        ])
+        .unwrap();
+        assert_eq!(mi.version.as_deref(), Some("0.6.5"));
+
+        let unresolved = info(&[(
+            "META-INF/neoforge.mods.toml",
+            "[[mods]]\nmodId=\"x\"\nversion=\"${file.jarVersion}\"\n",
+        )])
+        .unwrap();
+        assert_eq!(
+            unresolved.version, None,
+            "no MANIFEST.MF -> no made-up version"
+        );
+    }
+
+    #[test]
+    fn collects_every_declared_mod_but_ignores_dependencies() {
+        let toml = "[[mods]]\nmodId=\"first\"\nversion=\"1.0\"\n\
+                    [[mods]]\nmodId=\"second\"\nversion=\"2.0\"\n\
+                    [[mods]]\nmodId=\"\"\n\
+                    [[dependencies.first]]\nmodId=\"neoforge\"\ntype=\"required\"\n";
+        let mi = info(&[("META-INF/neoforge.mods.toml", toml)]).unwrap();
+        assert_eq!(mi.mod_ids, vec!["first".to_string(), "second".to_string()]);
+        assert_eq!(
+            mi.version.as_deref(),
+            Some("1.0"),
+            "version of the primary mod"
+        );
+    }
+
+    #[test]
+    fn libraries_and_broken_files_have_no_mod_info() {
+        assert_eq!(info(&[("com/example/Lib.class", "x")]), None);
+        assert_eq!(
+            info(&[("META-INF/neoforge.mods.toml", "not = [valid toml")]),
+            None
+        );
+        assert_eq!(
+            info(&[("META-INF/neoforge.mods.toml", "[[mods]]\nmodId=\"\"\n")]),
+            None
+        );
+        assert_eq!(
+            read_mod_info_from(Cursor::new(b"definitely not a zip".to_vec())),
+            None
+        );
+    }
+
+    #[test]
+    fn reads_from_a_file_on_disk() {
+        let dir = std::env::temp_dir().join(format!("bonegrader-modinfo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("m.jar");
+        std::fs::write(
+            &p,
+            jar(&[("META-INF/neoforge.mods.toml", "[[mods]]\nmodId=\"m\"\n")]),
+        )
+        .unwrap();
+        assert_eq!(read_mod_info(&p).unwrap().mod_ids, vec!["m".to_string()]);
+        assert_eq!(read_mod_info(&dir.join("missing.jar")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
