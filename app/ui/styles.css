@@ -35,6 +35,7 @@ header h1 {
   font-size: 22px;
   letter-spacing: 0.3px;
 }
+.version { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 4px; }
 .subtitle { margin: 2px 0 0; color: var(--muted); }
 
 main { padding: 12px 24px 32px; max-width: 760px; }
@@ -284,8 +285,8 @@ button.ghost:hover { background: var(--card-hover); }
 .step-panels .status { margin: 0 0 10px; min-height: 0; }
 .step-panels .status:empty { display: none; }
 
-/* Keep the fixed window intact: a long change-list scrolls, buttons stay put. */
-#planBody { max-height: 220px; overflow-y: auto; padding-right: 4px; }
+/* A long change-list scrolls inside the card, the buttons stay put. */
+#planBody { max-height: calc(100vh - 330px); min-height: 90px; overflow-y: auto; padding-right: 4px; }
 #planBody::-webkit-scrollbar { width: 8px; }
 #planBody::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
 #planBody::-webkit-scrollbar-track { background: transparent; }
@@ -309,3 +310,52 @@ button.ghost:hover { background: var(--card-hover); }
   .stepper::before { left: 30px; right: 30px; top: 23px; bottom: auto; width: auto; height: 2px; }
   .step-label .step-num { display: none; }
 }
+
+/* ---------- server info, hints, results ---------- */
+.banner { border-radius: 8px; padding: 9px 12px; margin: 0 0 10px; font-size: 13px; }
+.banner.info { background: rgba(111, 209, 122, 0.08); border: 1px solid #2c4a33; }
+.banner.err { background: rgba(224, 108, 108, 0.1); border: 1px solid var(--danger); }
+.banner a { color: var(--accent); }
+
+.server-info {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #10131a;
+}
+.server-info .name { font-weight: 600; }
+.server-info .meta { color: var(--muted); font-size: 12px; }
+.server-info .signed { color: var(--accent); font-size: 12px; margin-top: 3px; }
+
+.instance-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.instance-text { min-width: 0; overflow-wrap: anywhere; }
+.badges { display: flex; align-items: center; gap: 6px; }
+.badge.good { border-color: var(--accent); color: var(--accent); }
+
+.small { font-size: 12px; }
+.summary { margin: 0 0 10px; font-size: 12px; }
+.plan-row code { overflow-wrap: anywhere; }
+
+.warn-box {
+  border: 1px solid var(--danger);
+  background: rgba(224, 108, 108, 0.07);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.warn-box p { margin: 6px 0 10px; }
+.confirm { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; margin: 0; }
+
+.result {
+  border: 1px solid #2c4a33;
+  background: rgba(111, 209, 122, 0.07);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.result-title { font-weight: 600; margin-bottom: 4px; }
+
+.actions .spacer { flex: 1; }
+button.danger { border-color: var(--danger); color: var(--danger); }

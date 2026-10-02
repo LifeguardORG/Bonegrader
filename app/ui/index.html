@@ -10,7 +10,7 @@
     <header>
       <img class="logo" src="logo.svg" alt="Bonegrader-Logo" />
       <div class="header-text">
-        <h1>Bonegrader</h1>
+        <h1>Bonegrader <span id="version" class="version"></span></h1>
         <p class="subtitle">Mod-Verzeichnis aktualisieren</p>
       </div>
     </header>
@@ -55,7 +55,8 @@
 
       <!-- Right: one step panel at a time -->
       <main class="step-panels">
-        <p id="status" class="status"></p>
+        <div id="banner" class="banner hidden" role="status"></div>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
 
         <!-- Step 1: channel -->
         <section class="panel card" data-step="1">
@@ -63,6 +64,7 @@
           <label for="baseUrl">Channel-URL</label>
           <input id="baseUrl" type="text" placeholder="https://bonegrader.rescue-compete.de/main" />
           <p class="muted hint">Adresse des Update-Servers — der Standard ist bereits vorbelegt.</p>
+          <div id="serverInfo" class="server-info hidden"></div>
           <div class="actions">
             <button id="next1" type="button">Weiter</button>
           </div>
@@ -74,8 +76,12 @@
           <div id="instances" class="instances">
             <p class="muted">Suche Instanzen …</p>
           </div>
+          <div class="instance-tools">
+            <button id="pickFolder" class="ghost" type="button">Ordner wählen …</button>
+            <button id="createInstance" class="ghost" type="button" title="Legt einen eigenen Spielordner für das Pack im offiziellen Launcher an">Eigene Instanz anlegen</button>
+          </div>
           <details class="manual">
-            <summary>Manuell einen Ordner angeben</summary>
+            <summary>Pfad von Hand eingeben</summary>
             <input id="manualPath" type="text" placeholder="/pfad/zur/instanz (enthält mods/)" />
             <button id="useManual" class="ghost" type="button">Diesen Ordner verwenden</button>
           </details>
@@ -89,12 +95,15 @@
         <!-- Step 3: plan -->
         <section id="planCard" class="panel card" data-step="3">
           <h2>Änderungen</h2>
+          <div id="result" class="result hidden" role="status"></div>
           <div id="planBody"></div>
           <div id="progress" class="progress hidden">
             <div class="bar"><div id="bar" class="fill"></div></div>
             <p id="progressText" class="muted"></p>
           </div>
           <div class="actions">
+            <button id="undoBtn" class="ghost hidden" type="button">Letztes Update rückgängig</button>
+            <span class="spacer"></span>
             <button class="ghost" type="button" data-goto="2">Zurück</button>
             <button id="applyBtn" type="button">Aktualisieren</button>
           </div>
