@@ -240,6 +240,39 @@ fn the_server_is_added_once_and_a_removal_sticks() {
 }
 
 #[test]
+fn a_corrupt_server_list_is_left_alone_and_retried_later() {
+    let inst = instance();
+    let server = MockServer::new();
+    server.put_blob(b"PACK");
+    let mut m = pack(b"PACK");
+    m.server = Some(ServerInfo {
+        name: "BonesAndBees".into(),
+        address: "play.bonesandbees.example".into(),
+    });
+    server.publish(&m, None);
+    write(&inst.path().join(servers::SERVERS_FILE), b"corrupt");
+    let up = updater(inst.path(), &server, &[]);
+
+    let prepared = up.prepare().unwrap();
+    assert!(
+        prepared.server.is_none(),
+        "an unreadable list is never rewritten"
+    );
+    up.apply(&prepared, &Decisions::default(), &opts(), "ts", &|_| {})
+        .unwrap();
+    assert_eq!(read(inst.path().join(servers::SERVERS_FILE)), b"corrupt");
+    assert_eq!(
+        load_state(inst.path()).unwrap().server_added,
+        None,
+        "not marked as added"
+    );
+
+    // Once the player's list is readable again, the server is offered.
+    std::fs::remove_file(inst.path().join(servers::SERVERS_FILE)).unwrap();
+    assert!(up.prepare().unwrap().server.is_some());
+}
+
+#[test]
 fn seeds_are_created_once_and_never_overwrite_the_players_files() {
     let inst = instance();
     let i = inst.path();

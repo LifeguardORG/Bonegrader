@@ -324,8 +324,11 @@ impl Updater<'_> {
                     .push(format!("Serverliste nicht aktualisiert: {e:#}")),
             }
         } else if let Some(server) = &manifest.server {
-            // Already listed: remember it, so a player's later removal sticks.
-            report.new_state.server_added = Some(server.address.clone());
+            // Listed already (by us or the player): remember it, so a later
+            // removal sticks. An unreadable list is retried next time instead.
+            if servers::has_server(self.instance, &server.address).unwrap_or(false) {
+                report.new_state.server_added = Some(server.address.clone());
+            }
         }
         save_state(self.instance, &report.new_state)?;
         Ok(UpdateOutcome {
