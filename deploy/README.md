@@ -64,6 +64,11 @@ Then, in `/etc/ssh/sshd_config`: `PasswordAuthentication no` and
 `PermitRootLogin prohibit-password` (or `no`), and `systemctl reload ssh`.
 Test `ssh deploy@<server>` in a second terminal before closing the first.
 
+The admin app never prompts (it has no terminal): it needs key login, and the
+server's host key must be known — connect once with `ssh deploy@<server>` and
+confirm it. **Verbindung testen** in the app then checks login, write access
+to the remote base and rsync on both ends.
+
 ## 3. DNS
 
 Point a record at the server, e.g.
@@ -104,7 +109,8 @@ Blobs are uploaded additively (`--ignore-existing`, never deleted remotely, so
 every earlier manifest stays complete). The live manifest is copied to
 `history/`, then signature and manifest are switched with one remote command —
 signature first; a client caught exactly in between sees a mismatched pair once
-and simply retries.
+and simply retries. An unsigned upload removes the old signature (it would not
+match the new manifest anyway).
 
 ## 6. Verify
 
@@ -141,6 +147,12 @@ Key rotation: add the new public key to `keys/manifest-signing.pub` (one per
 line), release, switch `--sign-key` to the new key, remove the old line later.
 A lost secret key means: new key, new client release.
 
+The admin app checks this for you: built from the same version as the player
+app, it knows which keys the players trust and refuses to publish a manifest
+they would reject (unsigned while a signature is required, or signed with a
+key that is not in `keys/manifest-signing.pub`). Publishing unsigned while
+clients do not check yet is allowed, with a clear warning.
+
 ## 8. Beta channel
 
 Channels are independent folders, so testing before everyone gets it is just a
@@ -171,7 +183,10 @@ deploy/deploy-site.sh deploy@<server> /srv/bonegrader          # landing page (w
   ```
 
   The replaced manifest is itself saved to `history/`, so a rollback can be
-  rolled back. Players can also undo the last update locally
-  ("Letztes Update rückgängig" in the app, `bonegrader undo` in the CLI).
+  rolled back. The admin app does the same under **Verlauf & Rollback**: it
+  lists the live manifest and every earlier one (build date, files,
+  signature) with a button to switch back. Players can also undo the last
+  update locally ("Update vom … rückgängig" in the app, `bonegrader undo` in
+  the CLI).
 * The web app is untouched; to remove Bonegrader just delete the Caddy block +
   mount and reload.

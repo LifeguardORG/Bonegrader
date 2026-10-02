@@ -14,19 +14,31 @@ kein Dateien-Verschieben mehr.
    - **Windows:** `.msi` oder `.exe`
    - **Linux:** `.AppImage` oder `.deb`
    - **macOS:** `.dmg` (Apple Silicon und Intel)
-2. Bonegrader öffnen. Die Server-Adresse ist bereits vorbelegt → **Weiter**.
-3. **Instanz wählen**: CurseForge-, Prism- und Instanzen des offiziellen
+2. Bonegrader öffnen. Die Server-Adresse ist bereits eingetragen → **Weiter**
+   (nur bei Bedarf unter „Server ändern“ anpassen).
+3. **Instanz wählen**: CurseForge-, Prism- und Profile des offiziellen
    Launchers werden erkannt, sonst **Ordner wählen …** oder **Eigene Instanz
    anlegen** (eigener Spielordner fürs Pack im offiziellen Launcher).
-4. **Prüfen** → Änderungen ansehen → **Aktualisieren**.
+4. **Prüfen** → Änderungen ansehen (mit Mod-Namen und Versionen, z. B.
+   „Create 6.0.10 → 6.0.11“) → **Aktualisieren**.
 
-Bei „Zusatz-Mods“ bzw. Konflikten fragt Bonegrader nach, bevor etwas passiert.
-Sieht die Instanz nicht nach dem Pack aus (z. B. ein anderes Modpack), musst du
-das erst bestätigen. Ersetzte/entfernte Dateien landen in
-`.bonegrader-backup/`; **„Letztes Update rückgängig“** stellt den vorherigen
-Stand wieder her. Fehlt NeoForge (offizieller Launcher), richtet Bonegrader es
-auf Knopfdruck ein; der Server wird einmalig in die Mehrspieler-Liste
-eingetragen.
+**Ab dem zweiten Start** prüft Bonegrader von selbst und zeigt sofort
+„… ist aktuell“ oder die anstehenden Änderungen – ein Klick genügt.
+
+- Während des Downloads siehst du Tempo und Restzeit und kannst
+  **abbrechen**: Es wird nichts verändert, bereits geladene Dateien werden beim
+  nächsten Mal wiederverwendet. Schließt du das Fenster mitten im Update, fragt
+  Bonegrader vorher nach.
+- Eigene Mods bleiben erhalten (auf Wunsch einzeln oder alle entfernen); bei
+  Konflikten mit dem Pack fragt Bonegrader nach. Sieht die Instanz nicht nach
+  dem Pack aus (z. B. ein anderes Modpack), musst du das erst bestätigen.
+- Ersetzte/entfernte Dateien landen in `.bonegrader-backup/` („Backup-Ordner
+  öffnen“); **„Update vom … rückgängig“** stellt den vorherigen Stand wieder her.
+- Fehlt NeoForge (offizieller Launcher), richtet Bonegrader es auf Knopfdruck
+  ein; der Server wird einmalig in die Mehrspieler-Liste eingetragen.
+- Fehler werden in Klartext erklärt („Keine Verbindung zum Update-Server“,
+  „Minecraft läuft noch“ …), mit „Erneut versuchen“ und kopierbaren Details.
+  Die App folgt dem hellen bzw. dunklen Design des Systems.
 
 **Warnung beim ersten Start?** Die Installer sind (noch) nicht code-signiert:
 
@@ -40,7 +52,8 @@ eingetragen.
   `manifest.json.sig`) + **content-addressed** Blobs (`files/by-hash/<sha1>`,
   unveränderlich). Geladen wird nur über HTTPS.
 - Der Client scannt die Instanz, gleicht per SHA-1/`modId` gegen das Manifest ab
-  und lädt nur Abweichungen. Verwaltete Dateien werden getrackt, alles andere
+  und lädt nur Abweichungen. Das Manifest enthält die Mod-Namen und -Versionen
+  aus den `mods.toml`, damit Spieler lesbare Änderungen sehen. Verwaltete Dateien werden getrackt, alles andere
   gilt als Eigen-Mod und bleibt. Identische Doppel (z. B. `jei (1).jar`) werden
   erkannt und entfernt — zwei gleiche Mods würden das Spiel abstürzen lassen.
 - Downloads werden gestreamt, parallel geladen und vor jeder Änderung geprüft
@@ -87,8 +100,13 @@ deploy/deploy.sh ./dist/main deploy@<server> /srv/bonegrader main
 ```
 
 Oder per **Admin-App** (`cargo run -p bonegrader-admin`): Vorschau gegen den
-Live-Stand, dann Veröffentlichen. Hosting, Deploy-Nutzer, Signatur einrichten,
-Beta-Channel und Rollback: siehe [`deploy/README.md`](deploy/README.md).
+Live-Stand (mit Mod-Namen und Versionen), **Verbindung testen**, dann
+Veröffentlichen – mit Bestätigung und Zusammenfassung. Die App prüft, ob die
+Spieler-App den Stand annehmen würde (Signatur, Schlüssel), und sperrt das
+Veröffentlichen sonst; das Formular wird schon beim Tippen geprüft. Unter
+**„Verlauf & Rollback“** lässt sich ein früherer Stand per Klick zurückholen.
+Hosting, Deploy-Nutzer, Signatur einrichten, Beta-Channel und Rollback: siehe
+[`deploy/README.md`](deploy/README.md).
 
 ## Release bauen (Installer für alle OS)
 
@@ -108,7 +126,8 @@ ein (Draft-)Release. Lokal (nur das eigene OS): `cargo tauri build`. Danach mit
 crates/core      # Manifest, Hashing, Signaturen, jar-modId-Parser, Diff-Engine
 crates/client    # Pipeline (session), Downloads, transaktionales Apply + Undo,
                  # Instanz-Erkennung, NeoForge-Installer, servers.dat
-crates/publish   # Publisher: Instanz -> geprüftes Manifest + Content-Store, Signieren, Upload
+crates/publish   # Publisher: Instanz -> geprüftes Manifest + Content-Store, Signieren,
+                 # Upload, Verlauf/Rollback (remote)
 crates/cli       # headless Updater (plan/update/undo)
 app/             # Tauri-v2-Desktop-App (src-tauri + statisches ui/)
 admin/           # Tauri-v2-Admin-App zum Veröffentlichen
