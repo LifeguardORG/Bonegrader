@@ -520,17 +520,28 @@ fn is_plain_arg(s: &str) -> bool {
 /// rsync a built channel dir to `<ssh_host>:<remote_base>/<channel>`: blobs
 /// first (additive, immutable), then signature and manifest, switched with one
 /// remote command (signature first — a client caught in between sees a
-/// mismatched pair once and simply retries). Requires `rsync`/`ssh`.
+/// mismatched pair once and simply retries). The previous manifest is kept in
+/// `history/` for `deploy/rollback.sh`. Requires `rsync`/`ssh`.
 pub fn upload_channel(out: &Path, ssh_host: &str, remote_base: &str, channel: &str) -> Result<()> {
     if !is_plain_arg(ssh_host) || !is_plain_arg(remote_base) || !is_safe_component(channel) {
         bail!("SSH-Ziel, Remote-Ordner oder Channel enthalten unzulässige Zeichen");
     }
     let dest = format!("{}/{channel}", remote_base.trim_end_matches('/'));
     let signed = out.join(SIGNATURE_FILE).exists();
+    let n = OffsetDateTime::now_utc();
+    let stamp = format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        n.year(),
+        u8::from(n.month()),
+        n.day(),
+        n.hour(),
+        n.minute(),
+        n.second()
+    );
 
     run(Command::new("ssh")
         .arg(ssh_host)
-        .arg(format!("mkdir -p {dest}/files/by-hash")))?;
+        .arg(format!("mkdir -p {dest}/files/by-hash {dest}/history")))?;
     run(Command::new("rsync")
         .args(["-a", "--ignore-existing"])
         .arg(format!("{}/", out.join("files").display()))
@@ -539,7 +550,12 @@ pub fn upload_channel(out: &Path, ssh_host: &str, remote_base: &str, channel: &s
         .arg("-a")
         .arg(out.join("manifest.json"))
         .arg(format!("{ssh_host}:{dest}/manifest.json.tmp")))?;
-    let mut switch = String::new();
+    // Keep the live manifest in history/ (deploy/rollback.sh switches back).
+    let mut switch = format!(
+        "if [ -f {dest}/manifest.json ]; then cp -p {dest}/manifest.json {dest}/history/manifest-{stamp}.json; fi; \
+         if [ -f {dest}/{SIGNATURE_FILE} ]; then \
+         cp -p {dest}/{SIGNATURE_FILE} {dest}/history/manifest-{stamp}.json.sig; fi; "
+    );
     if signed {
         run(Command::new("rsync")
             .arg("-a")

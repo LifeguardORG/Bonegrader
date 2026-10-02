@@ -5,7 +5,7 @@
 # probes for. Run this once a release has been published.
 #
 # Usage: deploy/publish-installers.sh <ssh-host> [remote-base]
-# Example: deploy/publish-installers.sh root@62.171.170.74 /srv/bonegrader
+# Example: deploy/publish-installers.sh deploy@bonegrader.example.com /srv/bonegrader
 #
 set -euo pipefail
 

@@ -7,7 +7,7 @@
 # Usage:
 #   deploy/deploy-site.sh <ssh-host> [remote-base]
 # Example:
-#   deploy/deploy-site.sh root@62.171.170.74 /srv/bonegrader
+#   deploy/deploy-site.sh deploy@bonegrader.example.com /srv/bonegrader
 #
 # Installer file names the page looks for (put them in web/download/):
 #   bonegrader-windows-setup.exe   (and/or bonegrader-windows.msi)
