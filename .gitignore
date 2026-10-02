@@ -11,6 +11,8 @@
 .bonegrader-tmp/
 .bonegrader-state.json
 .bonegrader-state.json.tmp
+.bonegrader-cache.json
+.bonegrader-cache.json.tmp
 
 /dist
 *.log
