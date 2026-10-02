@@ -238,7 +238,14 @@ fn print_diff(d: &ManifestDiff) {
     }
     println!("Changes vs. previous manifest:");
     for u in &d.updated {
-        println!("  ~ update {}: {} -> {}", u.mod_id, u.old_file, u.new_file);
+        let name = u.name.as_deref().unwrap_or(&u.mod_id);
+        match (&u.old_version, &u.new_version) {
+            (Some(o), Some(n)) if o != n => println!(
+                "  ~ update {name} {o} -> {n} ({} -> {})",
+                u.old_file, u.new_file
+            ),
+            _ => println!("  ~ update {name}: {} -> {}", u.old_file, u.new_file),
+        }
     }
     for p in &d.changed {
         println!("  ~ change {p}");

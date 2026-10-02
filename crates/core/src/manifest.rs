@@ -54,6 +54,10 @@ pub struct FileEntry {
     pub mod_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mod_version: Option<String>,
+    /// Human-readable mod name (`displayName`), shown to players instead of
+    /// the file name. Optional: older manifests and libraries have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_name: Option<String>,
     pub url: String,
 }
 
@@ -220,6 +224,7 @@ mod tests {
             sha256: None,
             mod_id: None,
             mod_version: None,
+            mod_name: None,
             url: format!("files/by-hash/{sha1}"),
         }
     }
@@ -247,6 +252,7 @@ mod tests {
         let mut m = manifest(vec![FileEntry {
             mod_id: Some("create".into()),
             mod_version: Some("6.0.10".into()),
+            mod_name: None,
             sha256: Some("ab".repeat(32)),
             ..entry(Category::Mod, "mods/create-1.21.1-6.0.10.jar", SHA_A)
         }]);

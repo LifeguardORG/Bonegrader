@@ -5,7 +5,7 @@
 mod common;
 
 use bonegrader_client::apply::{
-    apply_with_progress, ApplyOptions, ApplyReport, Progress, BACKUP_DIR, TMP_DIR,
+    apply_with_progress, ApplyOptions, ApplyReport, Cancelled, Progress, BACKUP_DIR, TMP_DIR,
 };
 use bonegrader_client::exec::{finalize, Decisions};
 use bonegrader_client::session::undo_last;
@@ -16,7 +16,8 @@ use bonegrader_core::scan::LocalFile;
 use bonegrader_core::state::ClientState;
 use common::*;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn opts() -> ApplyOptions {
@@ -401,6 +402,64 @@ fn failed_download_leaves_the_instance_untouched_and_resumes() {
     assert_eq!((report.downloaded, report.reused), (1, 1));
     assert_eq!(read(i.join("mods/bad.jar")), bad);
     assert!(!i.join("mods/old.jar").exists());
+}
+
+#[test]
+fn cancelling_a_download_changes_nothing_and_keeps_finished_files() {
+    let first = b"FIRST".to_vec();
+    let second = (0..)
+        .map(|n| format!("SECOND{n}").into_bytes())
+        .find(|c| sha1_bytes(c) > sha1_bytes(&first))
+        .unwrap();
+    let inst = instance();
+    let i = inst.path();
+    write(&i.join("mods/old.jar"), b"OLD");
+    let server = MockServer::new();
+    server.put_blob(&first);
+    server.put_blob(&second);
+    let man = manifest(vec![
+        mod_entry("mods/first.jar", &first, "first"),
+        mod_entry("mods/second.jar", &second, "second"),
+    ]);
+    let state = state_with(&[("mods/old.jar", b"OLD", &["old"])]);
+    let scanned = vec![local("mods/old.jar", b"OLD", &["old"])];
+    let exec = finalize(&compute_plan(&man, &scanned, &state), &Decisions::default());
+    let cancel = Arc::new(AtomicBool::new(false));
+    let o = ApplyOptions {
+        parallel: 1,
+        cancel: Some(cancel.clone()),
+        ..opts()
+    };
+    let before = tree(i);
+
+    // The player cancels once the first file is in.
+    let progress = |p: &Progress| {
+        if p.done_files >= 1 {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    };
+    let err = apply_with_progress(i, &man, &exec, &server, BASE, &state, "ts1", &o, &progress)
+        .unwrap_err();
+    assert!(err.is::<Cancelled>(), "{err:#}");
+    let after: Vec<String> = tree(i)
+        .into_iter()
+        .filter(|p| !p.starts_with(TMP_DIR))
+        .collect();
+    assert_eq!(after, before, "instance untouched");
+    assert!(!i.join(BACKUP_DIR).exists());
+    assert_eq!(
+        server.calls(&MockServer::blob_url(&second)),
+        0,
+        "no new download started"
+    );
+
+    // Next attempt: the finished file is reused.
+    cancel.store(false, Ordering::SeqCst);
+    let report =
+        apply_with_progress(i, &man, &exec, &server, BASE, &state, "ts2", &o, &|_| {}).unwrap();
+    assert_eq!((report.downloaded, report.reused), (1, 1));
+    assert_eq!(server.calls(&MockServer::blob_url(&first)), 1);
+    assert_eq!(read(i.join("mods/second.jar")), second);
 }
 
 #[test]

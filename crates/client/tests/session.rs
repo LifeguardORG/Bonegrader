@@ -330,3 +330,39 @@ fn the_plan_view_has_what_the_ui_needs() {
         "resourcepacks/pack.zip"
     );
 }
+
+#[test]
+fn the_plan_view_names_the_local_mods_it_touches() {
+    let inst = instance();
+    let i = inst.path();
+    write(
+        &i.join("mods/create-6.0.10.jar"),
+        &named_jar("create", "6.0.10", "Create"),
+    );
+    write(
+        &i.join("mods/journeymap.jar"),
+        &named_jar("journeymap", "6.0.0", "JourneyMap"),
+    );
+    let new = named_jar("create", "6.0.11", "Create");
+    let server = MockServer::new();
+    server.put_blob(&new);
+    let mut e = mod_entry("mods/create-6.0.11.jar", &new, "create");
+    e.mod_version = Some("6.0.11".into());
+    e.mod_name = Some("Create".into());
+    server.publish(&manifest(vec![e]), None);
+
+    let prepared = updater(i, &server, &[]).prepare().unwrap();
+    let json = serde_json::to_value(prepared.view()).unwrap();
+    assert_eq!(
+        json["plan"]["downloads"][0]["replaces"],
+        "mods/create-6.0.10.jar"
+    );
+    assert_eq!(json["plan"]["downloads"][0]["entry"]["modName"], "Create");
+    assert_eq!(json["local"]["mods/create-6.0.10.jar"]["version"], "6.0.10");
+    assert_eq!(json["local"]["mods/journeymap.jar"]["name"], "JourneyMap");
+    assert_eq!(
+        json["local"].as_object().unwrap().len(),
+        2,
+        "only files the plan refers to"
+    );
+}

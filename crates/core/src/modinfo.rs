@@ -24,6 +24,8 @@ pub struct ModInfo {
     pub mod_ids: Vec<String>,
     /// Best-effort primary mod version (placeholders resolved).
     pub version: Option<String>,
+    /// Human-readable name of the primary mod (`displayName`), if declared.
+    pub display_name: Option<String>,
 }
 
 impl ModInfo {
@@ -53,18 +55,23 @@ fn read_mod_info_from_zip<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Optio
 
     let mut mod_ids = Vec::new();
     let mut first_version: Option<String> = None;
+    let mut display_name: Option<String> = None;
     for m in mods {
         if let Some(id) = m.get("modId").and_then(toml::Value::as_str) {
             if id.is_empty() {
                 continue;
             }
-            mod_ids.push(id.to_string());
-            if first_version.is_none() {
+            if mod_ids.is_empty() {
                 first_version = m
                     .get("version")
                     .and_then(toml::Value::as_str)
                     .map(str::to_string);
+                display_name = m
+                    .get("displayName")
+                    .and_then(toml::Value::as_str)
+                    .and_then(clean_display_name);
             }
+            mod_ids.push(id.to_string());
         }
     }
     if mod_ids.is_empty() {
@@ -77,7 +84,26 @@ fn read_mod_info_from_zip<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Optio
         other => other,
     };
 
-    Some(ModInfo { mod_ids, version })
+    Some(ModInfo {
+        mod_ids,
+        version,
+        display_name,
+    })
+}
+
+/// A display name fit for one line of UI text: trimmed, single spaces, no
+/// control characters or unresolved `${…}` placeholders, at most 64 chars.
+fn clean_display_name(raw: &str) -> Option<String> {
+    if raw.contains("${") {
+        return None;
+    }
+    let words: Vec<&str> = raw
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let joined = words.join(" ");
+    let name: String = joined.chars().take(64).collect();
+    (!name.is_empty()).then_some(name)
 }
 
 fn read_zip_text<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
@@ -130,6 +156,26 @@ pub(crate) mod tests {
         assert_eq!(mi.mod_ids, vec!["create".to_string()]);
         assert_eq!(mi.primary_id(), Some("create"));
         assert_eq!(mi.version.as_deref(), Some("6.0.10"));
+    }
+
+    #[test]
+    fn reads_the_display_name_of_the_primary_mod() {
+        let mi = info(&[(
+            "META-INF/neoforge.mods.toml",
+            "[[mods]]\nmodId=\"create\"\nversion=\"6.0.10\"\ndisplayName=\"  Create\\n \"\n\
+             [[mods]]\nmodId=\"ponder\"\ndisplayName=\"Ponder\"\n",
+        )])
+        .unwrap();
+        assert_eq!(mi.display_name.as_deref(), Some("Create"));
+
+        let none = info(&[(
+            "META-INF/neoforge.mods.toml",
+            "[[mods]]\nmodId=\"x\"\ndisplayName=\"${mod_name}\"\n",
+        )])
+        .unwrap();
+        assert_eq!(none.display_name, None, "placeholders are not names");
+        assert_eq!(clean_display_name(&"a".repeat(100)).unwrap().len(), 64);
+        assert_eq!(clean_display_name(" \t "), None);
     }
 
     #[test]

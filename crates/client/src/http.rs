@@ -1,6 +1,6 @@
 //! HTTP-backed [`Fetcher`] (feature `http`).
 
-use crate::fetch::{check_url, Fetcher, HttpStatus};
+use crate::fetch::{check_url, Fetcher, HttpStatus, Unreachable};
 use anyhow::{Context, Result};
 use std::io::Read;
 use std::time::Duration;
@@ -45,11 +45,35 @@ impl Fetcher for HttpFetcher {
                 }
                 .into())
             }
-            Err(e) => return Err(anyhow::Error::new(e).context(format!("GET {url}"))),
+            Err(ureq::Error::Transport(t)) => return Err(Unreachable::new(url, reason(&t)).into()),
         };
         // Redirects must not downgrade to plain HTTP either.
         check_url(resp.get_url()).context("Weiterleitung auf eine unsichere Adresse")?;
         Ok(Box::new(resp.into_reader()))
+    }
+}
+
+/// The most telling part of a transport error: its innermost cause (e.g.
+/// "Connection refused (os error 111)"), else ureq's own description.
+fn reason(t: &ureq::Transport) -> String {
+    let mut inner: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(t);
+    let mut deepest = None;
+    while let Some(e) = inner {
+        deepest = Some(e);
+        inner = e.source();
+    }
+    if let Some(io) = deepest.and_then(|e| e.downcast_ref::<std::io::Error>()) {
+        if matches!(
+            io.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            return "Zeitüberschreitung".into();
+        }
+    }
+    match (deepest, t.message()) {
+        (Some(e), _) => e.to_string(),
+        (None, Some(m)) => format!("{}: {m}", t.kind()),
+        (None, None) => t.kind().to_string(),
     }
 }
 
@@ -119,6 +143,24 @@ mod tests {
             .unwrap();
         assert!(crate::fetch::is_not_found(&err), "{err:#}");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn unreachable_servers_get_a_short_typed_error() {
+        // Bind and drop a listener: nothing listens on that port any more.
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = HttpFetcher::new()
+            .open(&format!("http://127.0.0.1:{port}/main/manifest.json"))
+            .err()
+            .unwrap();
+        let un = err.downcast_ref::<Unreachable>().expect("typed");
+        assert_eq!(un.host, format!("127.0.0.1:{port}"));
+        let text = format!("{err:#}");
+        assert_eq!(text.matches("127.0.0.1").count(), 1, "{text}");
     }
 
     #[test]

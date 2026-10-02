@@ -125,6 +125,7 @@ pub fn entry(cat: Category, path: &str, content: &[u8], mod_id: Option<&str>) ->
         sha256: Some(sha256_bytes(content)),
         mod_id: mod_id.map(str::to_string),
         mod_version: None,
+        mod_name: None,
         url: format!("files/by-hash/{sha1}"),
     }
 }
@@ -171,7 +172,25 @@ pub fn local(path: &str, content: &[u8], mod_ids: &[&str]) -> LocalFile {
         sha1: sha1_bytes(content),
         mod_ids: mod_ids.iter().map(|s| s.to_string()).collect(),
         mod_version: None,
+        mod_name: None,
     }
+}
+
+/// An in-memory mod jar declaring one mod with a version and display name.
+pub fn named_jar(mod_id: &str, version: &str, name: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    z.start_file(
+        "META-INF/neoforge.mods.toml",
+        zip::write::SimpleFileOptions::default(),
+    )
+    .unwrap();
+    write!(
+        z,
+        "[[mods]]\nmodId=\"{mod_id}\"\nversion=\"{version}\"\ndisplayName=\"{name}\"\n"
+    )
+    .unwrap();
+    z.finish().unwrap().into_inner()
 }
 
 pub fn managed(content: &[u8], mod_ids: &[&str]) -> ManagedEntry {

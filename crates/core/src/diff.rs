@@ -318,6 +318,7 @@ mod tests {
             sha256: None,
             mod_id: mod_id.map(str::to_string),
             mod_version: None,
+            mod_name: None,
             url: format!("files/by-hash/{sha1}"),
         }
     }
@@ -331,6 +332,7 @@ mod tests {
             sha1: sha1.into(),
             mod_ids: mod_ids.iter().map(|s| s.to_string()).collect(),
             mod_version: None,
+            mod_name: None,
         }
     }
 
@@ -809,6 +811,7 @@ mod tests {
                             sha256: None,
                             mod_id,
                             mod_version: None,
+                            mod_name: None,
                             url: String::new(),
                         });
                     }
@@ -834,6 +837,7 @@ mod tests {
                                 sha1,
                                 mod_ids: ids,
                                 mod_version: None,
+                                mod_name: None,
                             }
                         })
                         .collect();
@@ -887,6 +891,7 @@ mod tests {
                         sha1: d.entry.sha1.clone(),
                         mod_ids: d.entry.mod_id.clone().into_iter().collect(),
                         mod_version: None,
+                        mod_name: None,
                     },
                 );
             }

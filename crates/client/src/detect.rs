@@ -178,6 +178,14 @@ pub fn parse_launcher_profiles(json: &str, dotmc: &Path) -> Vec<DetectedInstance
             .get("lastVersionId")
             .and_then(|x| x.as_str())
             .unwrap_or("");
+        let kind = prof.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        // The launcher's built-in "Latest release/snapshot" entries are plain
+        // vanilla and follow every Minecraft release: never a pack instance,
+        // and installing NeoForge "into" them would rebuild the player's
+        // default profile. A dedicated instance is the right choice there.
+        if is_builtin_profile(kind) || is_builtin_profile(last) {
+            continue;
+        }
         let name = prof
             .get("name")
             .and_then(|x| x.as_str())
@@ -202,6 +210,10 @@ pub fn parse_launcher_profiles(json: &str, dotmc: &Path) -> Vec<DetectedInstance
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+fn is_builtin_profile(s: &str) -> bool {
+    matches!(s, "latest-release" | "latest-snapshot")
 }
 
 /// Discover every instance we can find automatically.
@@ -398,13 +410,15 @@ mod tests {
         let json = r#"{
             "profiles": {
                 "aaa": { "name": "BonesAndBees", "gameDir": "/home/p/.minecraft/bab", "lastVersionId": "neoforge-21.1.234" },
-                "bbb": { "name": "Vanilla", "lastVersionId": "1.21.1" }
+                "bbb": { "name": "Vanilla", "lastVersionId": "1.21.1" },
+                "ccc": { "name": "", "type": "latest-release", "lastVersionId": "latest-release" },
+                "ddd": { "name": "", "type": "latest-snapshot", "lastVersionId": "latest-snapshot" }
             },
             "version": 3
         }"#;
         let mut found = parse_launcher_profiles(json, dotmc);
         found.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.len(), 2, "built-in latest-* profiles are skipped");
 
         let bab = found.iter().find(|i| i.name == "BonesAndBees").unwrap();
         assert_eq!(bab.path, Path::new("/home/p/.minecraft/bab"));

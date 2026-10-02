@@ -9,17 +9,18 @@ use crate::apply::{
 use crate::exec::{finalize, Decisions};
 use crate::fetch::{is_not_found, resolve_url, Fetcher};
 use crate::servers;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use bonegrader_core::diff::{assess_instance, compute_plan, InstanceAssessment, UpdatePlan};
 use bonegrader_core::hash::sha1_bytes;
 use bonegrader_core::manifest::{
     ClientInfo, Loader, Manifest, ManifestError, SeedEntry, ServerInfo, SCHEMA_VERSION,
 };
-use bonegrader_core::scan::{scan_instance_cached, ScanCache};
+use bonegrader_core::scan::{scan_instance_cached, LocalFile, ScanCache};
 use bonegrader_core::sign::{parse_public_keys, verify_any, PublicKey, SIGNATURE_FILE};
 use bonegrader_core::state::ClientState;
 use bonegrader_core::version::is_older;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -77,10 +78,7 @@ pub fn fetch_manifest(
         }
         let sig = match fetcher.get_limited(&sig_url, 4096) {
             Ok(sig) => sig,
-            Err(e) if is_not_found(&e) => bail!(
-                "Der Server-Stand ist nicht signiert ({sig_url} fehlt). Bonegrader installiert nur \
-                 signierte Server-Stände – bitte dem Admin Bescheid geben."
-            ),
+            Err(e) if is_not_found(&e) => return Err(TrustError::Unsigned(sig_url).into()),
             Err(e) => return Err(e.context("Signatur laden")),
         };
         match verify_any(keys, &bytes, &String::from_utf8_lossy(&sig)) {
@@ -88,12 +86,44 @@ pub fn fetch_manifest(
             Err(e) => last = Some(e),
         }
     }
-    bail!(
-        "Die Signatur des Server-Stands ist ungültig ({}). Bonegrader installiert nichts davon – \
-         bitte dem Admin Bescheid geben.",
-        last.map(|e| e.to_string()).unwrap_or_default()
-    )
+    Err(TrustError::Invalid(last.map(|e| e.to_string()).unwrap_or_default()).into())
 }
+
+/// The manifest's authenticity could not be established.
+#[derive(Debug, thiserror::Error)]
+pub enum TrustError {
+    #[error(
+        "Der Server-Stand ist nicht signiert ({0} fehlt). Bonegrader installiert nur \
+         signierte Server-Stände – bitte dem Admin Bescheid geben."
+    )]
+    Unsigned(String),
+    #[error(
+        "Die Signatur des Server-Stands ist ungültig ({0}). Bonegrader installiert nichts \
+         davon – bitte dem Admin Bescheid geben."
+    )]
+    Invalid(String),
+}
+
+/// The URL answered, but not with a Bonegrader manifest (e.g. a web page).
+#[derive(Debug, thiserror::Error)]
+#[error("manifest.json ist kein gültiges Manifest")]
+pub struct NotAManifest(#[source] pub serde_json::Error);
+
+/// This Bonegrader is older than the manifest allows.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Diese Bonegrader-Version ({own}) ist zu alt für den aktuellen Server-Stand – \
+     mindestens {min} wird benötigt. Bitte zuerst Bonegrader aktualisieren."
+)]
+pub struct ClientTooOld {
+    pub own: String,
+    pub min: String,
+}
+
+/// The instance folder does not exist (any more).
+#[derive(Debug, thiserror::Error)]
+#[error("Instanz-Ordner nicht gefunden: {0}")]
+pub struct InstanceMissing(pub String);
 
 /// Parse and validate manifest bytes. The schema version is checked before
 /// the full parse, so a newer format yields "please update" rather than a
@@ -104,8 +134,7 @@ pub fn parse_manifest(bytes: &[u8], signature: SignatureStatus) -> Result<Fetche
     struct Probe {
         schema_version: u32,
     }
-    let probe: Probe =
-        serde_json::from_slice(bytes).context("manifest.json ist kein gültiges Manifest")?;
+    let probe: Probe = serde_json::from_slice(bytes).map_err(NotAManifest)?;
     if probe.schema_version > SCHEMA_VERSION {
         return Err(ManifestError::UnsupportedSchema {
             found: probe.schema_version,
@@ -113,8 +142,7 @@ pub fn parse_manifest(bytes: &[u8], signature: SignatureStatus) -> Result<Fetche
         }
         .into());
     }
-    let manifest: Manifest =
-        serde_json::from_slice(bytes).context("manifest.json ist kein gültiges Manifest")?;
+    let manifest: Manifest = serde_json::from_slice(bytes).map_err(NotAManifest)?;
     manifest.validate()?;
     Ok(FetchedManifest {
         manifest,
@@ -159,6 +187,17 @@ pub fn client_compat(info: Option<&ClientInfo>, own: &str) -> ClientCompat {
     ClientCompat::Current
 }
 
+/// Name and version of a local file the plan touches, so front-ends can show
+/// "Create 6.0.10 → 6.0.11" instead of bare file names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
 /// Everything a front-end needs to show before the player confirms.
 #[derive(Debug, Clone)]
 pub struct Prepared {
@@ -171,6 +210,9 @@ pub struct Prepared {
     pub server: Option<ServerInfo>,
     pub assessment: InstanceAssessment,
     pub compat: ClientCompat,
+    /// Mod name/version of the local files the plan replaces, removes or asks
+    /// about (only those with metadata).
+    pub local: BTreeMap<String, LocalMeta>,
 }
 
 impl Prepared {
@@ -200,6 +242,7 @@ impl Prepared {
             server: self.server.as_ref(),
             assessment: &self.assessment,
             compat: &self.compat,
+            local: &self.local,
             noop: self.is_noop(),
             download_bytes: self.download_bytes(),
         }
@@ -220,6 +263,7 @@ pub struct PlanView<'a> {
     pub server: Option<&'a ServerInfo>,
     pub assessment: &'a InstanceAssessment,
     pub compat: &'a ClientCompat,
+    pub local: &'a BTreeMap<String, LocalMeta>,
     pub noop: bool,
     pub download_bytes: u64,
 }
@@ -250,7 +294,7 @@ impl Updater<'_> {
     /// the slow scan), scan the instance and plan the update. Changes nothing.
     pub fn prepare(&self) -> Result<Prepared> {
         if !self.instance.is_dir() {
-            bail!("Instanz-Ordner nicht gefunden: {}", self.instance.display());
+            return Err(InstanceMissing(self.instance.display().to_string()).into());
         }
         let fetched = fetch_manifest(self.fetcher, self.base_url, self.keys)?;
         let state = load_state(self.instance)?;
@@ -270,6 +314,7 @@ impl Updater<'_> {
         let server = pending_server(self.instance, m, &state);
         let assessment = assess_instance(m, &local, &state);
         let compat = client_compat(m.client.as_ref(), CLIENT_VERSION);
+        let local = local_meta(&plan, &local);
         Ok(Prepared {
             fetched,
             state,
@@ -278,6 +323,7 @@ impl Updater<'_> {
             server,
             assessment,
             compat,
+            local,
         })
     }
 
@@ -292,10 +338,11 @@ impl Updater<'_> {
         progress: &(dyn Fn(&Progress) + Sync),
     ) -> Result<UpdateOutcome> {
         if let ClientCompat::UpdateRequired { min, .. } = &prepared.compat {
-            bail!(
-                "Diese Bonegrader-Version ({CLIENT_VERSION}) ist zu alt für den aktuellen Server-Stand – \
-                 mindestens {min} wird benötigt. Bitte zuerst Bonegrader aktualisieren."
-            );
+            return Err(ClientTooOld {
+                own: CLIENT_VERSION.into(),
+                min: min.clone(),
+            }
+            .into());
         }
         let manifest = &prepared.fetched.manifest;
         let mut exec = finalize(&prepared.plan, decisions);
@@ -353,6 +400,37 @@ impl Updater<'_> {
         }
         self.apply(&prepared, decisions, opts, timestamp, progress)
     }
+}
+
+/// Names and versions of the local files `plan` refers to.
+fn local_meta(plan: &UpdatePlan, local: &[LocalFile]) -> BTreeMap<String, LocalMeta> {
+    let by_path: BTreeMap<&str, &LocalFile> = local.iter().map(|l| (l.path.as_str(), l)).collect();
+    let referenced = plan
+        .downloads
+        .iter()
+        .filter_map(|d| d.replaces.as_deref())
+        .chain(plan.removals.iter().map(String::as_str))
+        .chain(plan.duplicates.iter().map(String::as_str))
+        .chain(plan.user_extras.iter().map(String::as_str))
+        .chain(plan.collisions.iter().map(|c| c.local_path.as_str()))
+        // The pack's copy in a collision, when it is installed already.
+        .chain(plan.collisions.iter().map(|c| c.manifest_path.as_str()));
+    let mut out = BTreeMap::new();
+    for path in referenced {
+        let Some(lf) = by_path.get(path) else {
+            continue;
+        };
+        if lf.mod_name.is_some() || lf.mod_version.is_some() {
+            out.insert(
+                path.to_string(),
+                LocalMeta {
+                    name: lf.mod_name.clone(),
+                    version: lf.mod_version.clone(),
+                },
+            );
+        }
+    }
+    out
 }
 
 fn pending_server(instance: &Path, manifest: &Manifest, state: &ClientState) -> Option<ServerInfo> {

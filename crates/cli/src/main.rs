@@ -70,7 +70,7 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            eprintln!("error: {}", bonegrader_client::errors::describe(&e));
             std::process::ExitCode::FAILURE
         }
     }

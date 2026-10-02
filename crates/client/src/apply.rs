@@ -26,7 +26,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Staging folder inside the instance (same filesystem → atomic renames).
@@ -49,6 +49,10 @@ pub struct ApplyOptions {
     pub retry_delay: Duration,
     /// Backup folders to keep (older ones are deleted after an update).
     pub keep_backups: usize,
+    /// Set to `true` to stop while downloading. Honoured until the commit
+    /// starts (the instance is untouched until then); verified downloads are
+    /// kept for the next attempt.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for ApplyOptions {
@@ -58,9 +62,39 @@ impl Default for ApplyOptions {
             retries: 2,
             retry_delay: Duration::from_secs(1),
             keep_backups: 5,
+            cancel: None,
         }
     }
 }
+
+impl ApplyOptions {
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::SeqCst))
+    }
+}
+
+/// The player cancelled the update before anything was changed.
+#[derive(Debug, thiserror::Error)]
+#[error("Abgebrochen – es wurde nichts verändert.")]
+pub struct Cancelled;
+
+/// A download did not match the manifest (size or checksum).
+#[derive(Debug, thiserror::Error)]
+#[error("{file}: {problem}")]
+pub struct BadDownload {
+    pub file: String,
+    pub problem: String,
+}
+
+/// A file the update must move is held open by another program.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "die Datei wird von einem anderen Programm benutzt – läuft Minecraft noch? Bitte \
+     schließen und erneut versuchen."
+)]
+pub struct FileInUse;
 
 /// A progress update emitted during [`apply_with_progress`]. `phase` is one of
 /// `download`, `apply`, `done`. Byte counts move while a file is transferred.
@@ -165,7 +199,15 @@ pub fn apply_with_progress(
     // 1. Validate.
     validate(exec)?;
     let blobs = collect_blobs(exec, base_url)?;
-    let reporter = Reporter::new(progress, blobs.len(), blobs.values().map(|b| b.size).sum());
+    let reporter = Reporter::new(
+        progress,
+        blobs.len(),
+        blobs.values().map(|b| b.size).sum(),
+        opts.cancel.as_deref(),
+    );
+    if opts.cancelled() {
+        return Err(Cancelled.into());
+    }
 
     // 2. Stage — nothing destructive yet; on failure the verified blobs stay
     //    for the next attempt.
@@ -173,6 +215,9 @@ pub fn apply_with_progress(
     let tmp_dir = instance.join(TMP_DIR);
     fs::create_dir_all(&tmp_dir).with_context(|| format!("{} anlegen", tmp_dir.display()))?;
     let staged = stage_all(instance, &tmp_dir, &blobs, fetcher, opts, &reporter)?;
+    if opts.cancelled() {
+        return Err(Cancelled.into()); // last chance: nothing was changed yet
+    }
 
     // 3 + 4. Pre-flight and journalled commit.
     reporter.phase("apply");
@@ -372,7 +417,7 @@ fn stage_all(
     std::thread::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| loop {
-                if stop.load(Ordering::SeqCst) {
+                if stop.load(Ordering::SeqCst) || opts.cancelled() {
                     break;
                 }
                 let Some(blob) = jobs.get(next.fetch_add(1, Ordering::SeqCst)) else {
@@ -397,6 +442,9 @@ fn stage_all(
         }
     });
 
+    if opts.cancelled() {
+        return Err(Cancelled.into());
+    }
     if let Some(e) = first_error.into_inner().unwrap_or_else(|p| p.into_inner()) {
         return Err(e);
     }
@@ -424,8 +472,11 @@ fn stage_blob(
     // Verified in an earlier, interrupted run?
     if dest.is_file() {
         if let Ok(f) = File::open(&dest) {
-            if verify_stream(f, None, blob, reporter).is_ok() {
-                return Ok(Source::Local);
+            match verify_stream(f, None, blob, reporter) {
+                Ok(()) => return Ok(Source::Local),
+                // Interrupted, not disproven: keep it for the next attempt.
+                Err(e) if e.is::<Cancelled>() => return Err(e),
+                Err(_) => {}
             }
         }
         let _ = fs::remove_file(&dest);
@@ -441,8 +492,11 @@ fn stage_blob(
                 fs::rename(&part, &dest).with_context(|| format!("{} ablegen", dest.display()))?;
                 return Ok(Source::Local);
             }
-            Err(_) => {
+            Err(e) => {
                 let _ = fs::remove_file(&part);
+                if e.is::<Cancelled>() {
+                    return Err(e);
+                }
             }
         }
     }
@@ -459,6 +513,9 @@ fn stage_blob(
             }
             Err(e) => {
                 let _ = fs::remove_file(&part);
+                if e.is::<Cancelled>() || opts.cancelled() {
+                    return Err(Cancelled.into());
+                }
                 if attempt >= opts.retries || is_permanent(&e) {
                     return Err(e.context(format!("Download von {} fehlgeschlagen", blob.label)));
                 }
@@ -491,16 +548,19 @@ fn verify_stream(
         let mut hasher = Hasher::new();
         let mut buf = vec![0u8; 64 * 1024];
         loop {
+            if reporter.cancelled() {
+                return Err(Cancelled.into());
+            }
             let n = src.read(&mut buf).context("Lesefehler")?;
             if n == 0 {
                 break;
             }
             if hasher.len() + n as u64 > blob.size {
-                bail!(
-                    "{}: mehr Daten als erwartet ({} Bytes)",
-                    blob.label,
-                    blob.size
-                );
+                return Err(BadDownload {
+                    file: blob.label.clone(),
+                    problem: format!("mehr Daten als erwartet ({} Bytes)", blob.size),
+                }
+                .into());
             }
             hasher.update(&buf[..n]);
             if let Some(f) = file.as_mut() {
@@ -514,15 +574,18 @@ fn verify_stream(
         }
         let d = hasher.finish();
         if d.len != blob.size {
-            bail!(
-                "{}: unvollständig ({} von {} Bytes)",
-                blob.label,
-                d.len,
-                blob.size
-            );
+            return Err(BadDownload {
+                file: blob.label.clone(),
+                problem: format!("unvollständig ({} von {} Bytes)", d.len, blob.size),
+            }
+            .into());
         }
         if d.sha1 != blob.sha1 || blob.sha256.as_ref().is_some_and(|want| want != &d.sha256) {
-            bail!("{}: Prüfsumme stimmt nicht – Datei beschädigt", blob.label);
+            return Err(BadDownload {
+                file: blob.label.clone(),
+                problem: "Prüfsumme stimmt nicht – Datei beschädigt".into(),
+            }
+            .into());
         }
         Ok(())
     })();
@@ -532,7 +595,8 @@ fn verify_stream(
     res
 }
 
-/// Throttled, thread-safe progress reporting.
+/// Throttled, thread-safe progress reporting (and the cancel flag, which every
+/// transfer checks between chunks).
 struct Reporter<'a> {
     sink: &'a (dyn Fn(&Progress) + Sync),
     total_files: usize,
@@ -540,10 +604,16 @@ struct Reporter<'a> {
     done_files: AtomicUsize,
     done_bytes: AtomicU64,
     last_emit: Mutex<Option<Instant>>,
+    cancel: Option<&'a AtomicBool>,
 }
 
 impl<'a> Reporter<'a> {
-    fn new(sink: &'a (dyn Fn(&Progress) + Sync), total_files: usize, total_bytes: u64) -> Self {
+    fn new(
+        sink: &'a (dyn Fn(&Progress) + Sync),
+        total_files: usize,
+        total_bytes: u64,
+        cancel: Option<&'a AtomicBool>,
+    ) -> Self {
         Self {
             sink,
             total_files,
@@ -551,7 +621,12 @@ impl<'a> Reporter<'a> {
             done_files: AtomicUsize::new(0),
             done_bytes: AtomicU64::new(0),
             last_emit: Mutex::new(None),
+            cancel,
         }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.is_some_and(|c| c.load(Ordering::SeqCst))
     }
 
     fn emit(&self, phase: &str, current: &str, force: bool) {
@@ -630,7 +705,7 @@ fn ensure_movable(p: &Path) -> Result<()> {
             Err(_) => return Ok(()),
         }
     }
-    bail!("die Datei wird von einem anderen Programm benutzt – läuft Minecraft noch? Bitte schließen und erneut versuchen.")
+    Err(FileInUse.into())
 }
 
 #[cfg(not(windows))]

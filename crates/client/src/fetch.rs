@@ -33,6 +33,28 @@ pub struct HttpStatus {
     pub url: String,
 }
 
+/// The server could not be reached at all: no network, DNS failure, refused
+/// or timed-out connection, TLS problem. Carries only the innermost reason, so
+/// the message does not repeat the URL at every level.
+#[derive(Debug, thiserror::Error)]
+#[error("keine Verbindung zu {host}: {reason}")]
+pub struct Unreachable {
+    pub host: String,
+    pub reason: String,
+}
+
+impl Unreachable {
+    pub fn new(url: &str, reason: impl Into<String>) -> Self {
+        let rest = url.split_once("://").map_or(url, |(_, r)| r);
+        let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let host = host.rsplit('@').next().unwrap_or(host);
+        Self {
+            host: host.to_string(),
+            reason: reason.into(),
+        }
+    }
+}
+
 /// True if `err` (or anything in its cause chain) is an HTTP 404/410.
 pub fn is_not_found(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
@@ -121,6 +143,19 @@ mod tests {
         assert!(check_url("http://evil.com@example.com/").is_err());
         assert!(check_url("ftp://example.com/").is_err());
         assert!(check_url("bonegrader.example.com/main").is_err());
+    }
+
+    #[test]
+    fn unreachable_names_only_the_host() {
+        let e = Unreachable::new(
+            "https://user@bonegrader.example:8443/main/manifest.json",
+            "Zeitüberschreitung",
+        );
+        assert_eq!(e.host, "bonegrader.example:8443");
+        assert_eq!(
+            e.to_string(),
+            "keine Verbindung zu bonegrader.example:8443: Zeitüberschreitung"
+        );
     }
 
     #[test]

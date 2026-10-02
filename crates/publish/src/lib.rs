@@ -1,11 +1,10 @@
 //! Reusable publisher logic shared by the `bonegrader-publish` CLI and the admin
 //! GUI: scan an instance, build and check a channel manifest, diff it against
-//! what's live, sign it, populate the content-addressed store and upload a
-//! channel to the server.
+//! what's live, sign it and populate the content-addressed store. Talking to
+//! the server (upload, history, rollback) lives in [`remote`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use bonegrader_core::hash::digest_file;
@@ -16,6 +15,8 @@ use bonegrader_core::manifest::{
 use bonegrader_core::paths::{is_safe_component, is_safe_seed_path, SEED_DIRS, SEED_FILES};
 use bonegrader_core::scan::{scan_instance, LocalFile};
 use bonegrader_core::sign::{PublicKey, SecretKey, SIGNATURE_FILE};
+
+pub mod remote;
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -205,6 +206,7 @@ fn build_entry(instance: &Path, lf: &LocalFile, base_url: &str) -> Result<FileEn
         sha256: Some(d.sha256),
         mod_id: lf.mod_ids.first().cloned(),
         mod_version: lf.mod_version.clone(),
+        mod_name: lf.mod_name.clone(),
         url: blob_url(base_url, &lf.sha1),
     })
 }
@@ -282,6 +284,22 @@ pub struct ModUpdate {
     pub mod_id: String,
     pub old_file: String,
     pub new_file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_version: Option<String>,
+}
+
+/// Display name and version of a listed path (mods with metadata only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryLabel {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Structured diff of a new manifest against the previously published one.
@@ -293,6 +311,8 @@ pub struct ManifestDiff {
     pub removed: Vec<String>,
     pub changed: Vec<String>,
     pub updated: Vec<ModUpdate>,
+    /// Names/versions of the paths in `added`, `removed` and `changed`.
+    pub labels: BTreeMap<String, EntryLabel>,
 }
 
 impl ManifestDiff {
@@ -309,9 +329,11 @@ pub fn diff_manifests(old: Option<&Manifest>, new: &Manifest) -> ManifestDiff {
     let old = match old {
         Some(o) => o,
         None => {
+            let added: Vec<String> = new.files.iter().map(|f| f.path.clone()).collect();
             return ManifestDiff {
                 first_build: true,
-                added: new.files.iter().map(|f| f.path.clone()).collect(),
+                labels: labels_for(&added, new, None),
+                added,
                 ..Default::default()
             };
         }
@@ -353,6 +375,9 @@ pub fn diff_manifests(old: Option<&Manifest>, new: &Manifest) -> ManifestDiff {
                     mod_id: mid.clone(),
                     old_file: of.file_name.clone(),
                     new_file: nf.file_name.clone(),
+                    name: nf.mod_name.clone().or_else(|| of.mod_name.clone()),
+                    old_version: of.mod_version.clone(),
+                    new_version: nf.mod_version.clone(),
                 });
             }
         }
@@ -369,13 +394,49 @@ pub fn diff_manifests(old: Option<&Manifest>, new: &Manifest) -> ManifestDiff {
             .is_none_or(|id| !updated_ids.contains(id))
     });
 
+    let added: Vec<String> = added.iter().map(|f| f.path.clone()).collect();
+    let removed: Vec<String> = removed.iter().map(|f| f.path.clone()).collect();
+    let listed: Vec<String> = added
+        .iter()
+        .chain(&removed)
+        .chain(&changed)
+        .cloned()
+        .collect();
     ManifestDiff {
         first_build: false,
-        added: added.iter().map(|f| f.path.clone()).collect(),
-        removed: removed.iter().map(|f| f.path.clone()).collect(),
+        labels: labels_for(&listed, new, Some(old)),
+        added,
+        removed,
         changed,
         updated,
     }
+}
+
+/// Labels for `paths`, taken from `new` (or `old` for removed files).
+fn labels_for(
+    paths: &[String],
+    new: &Manifest,
+    old: Option<&Manifest>,
+) -> BTreeMap<String, EntryLabel> {
+    let mut by_path: BTreeMap<&str, &FileEntry> = BTreeMap::new();
+    for f in old.into_iter().flat_map(|o| &o.files).chain(&new.files) {
+        by_path.insert(f.path.as_str(), f); // the new entry wins
+    }
+    paths
+        .iter()
+        .filter_map(|p| {
+            let f = by_path.get(p.as_str())?;
+            (f.mod_name.is_some() || f.mod_version.is_some()).then(|| {
+                (
+                    p.clone(),
+                    EntryLabel {
+                        name: f.mod_name.clone(),
+                        version: f.mod_version.clone(),
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 fn mods_by_id(m: &Manifest) -> BTreeMap<String, &FileEntry> {
@@ -507,79 +568,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Characters allowed in the SSH target and remote folder: enough for
-/// `deploy@host`, `/srv/bonegrader`, `~/sites/x` — and nothing a shell or
-/// rsync would interpret.
-fn is_plain_arg(s: &str) -> bool {
-    !s.is_empty()
-        && !s.starts_with('-')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "@._/~:-".contains(c))
-}
-
-/// rsync a built channel dir to `<ssh_host>:<remote_base>/<channel>`: blobs
-/// first (additive, immutable), then signature and manifest, switched with one
-/// remote command (signature first — a client caught in between sees a
-/// mismatched pair once and simply retries). The previous manifest is kept in
-/// `history/` for `deploy/rollback.sh`. Requires `rsync`/`ssh`.
-pub fn upload_channel(out: &Path, ssh_host: &str, remote_base: &str, channel: &str) -> Result<()> {
-    if !is_plain_arg(ssh_host) || !is_plain_arg(remote_base) || !is_safe_component(channel) {
-        bail!("SSH-Ziel, Remote-Ordner oder Channel enthalten unzulässige Zeichen");
-    }
-    let dest = format!("{}/{channel}", remote_base.trim_end_matches('/'));
-    let signed = out.join(SIGNATURE_FILE).exists();
-    let n = OffsetDateTime::now_utc();
-    let stamp = format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        n.year(),
-        u8::from(n.month()),
-        n.day(),
-        n.hour(),
-        n.minute(),
-        n.second()
-    );
-
-    run(Command::new("ssh")
-        .arg(ssh_host)
-        .arg(format!("mkdir -p {dest}/files/by-hash {dest}/history")))?;
-    run(Command::new("rsync")
-        .args(["-a", "--ignore-existing"])
-        .arg(format!("{}/", out.join("files").display()))
-        .arg(format!("{ssh_host}:{dest}/files/")))?;
-    run(Command::new("rsync")
-        .arg("-a")
-        .arg(out.join("manifest.json"))
-        .arg(format!("{ssh_host}:{dest}/manifest.json.tmp")))?;
-    // Keep the live manifest in history/ (deploy/rollback.sh switches back).
-    let mut switch = format!(
-        "if [ -f {dest}/manifest.json ]; then cp -p {dest}/manifest.json {dest}/history/manifest-{stamp}.json; fi; \
-         if [ -f {dest}/{SIGNATURE_FILE} ]; then \
-         cp -p {dest}/{SIGNATURE_FILE} {dest}/history/manifest-{stamp}.json.sig; fi; "
-    );
-    if signed {
-        run(Command::new("rsync")
-            .arg("-a")
-            .arg(out.join(SIGNATURE_FILE))
-            .arg(format!("{ssh_host}:{dest}/{SIGNATURE_FILE}.tmp")))?;
-        switch.push_str(&format!(
-            "mv -f {dest}/{SIGNATURE_FILE}.tmp {dest}/{SIGNATURE_FILE} && "
-        ));
-    }
-    switch.push_str(&format!(
-        "mv -f {dest}/manifest.json.tmp {dest}/manifest.json"
-    ));
-    run(Command::new("ssh").arg(ssh_host).arg(switch))?;
-    Ok(())
-}
-
-fn run(cmd: &mut Command) -> Result<()> {
-    let status = cmd.status().with_context(|| format!("{cmd:?} starten"))?;
-    if !status.success() {
-        bail!("Befehl fehlgeschlagen ({:?}): {cmd:?}", status.code());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +583,7 @@ mod tests {
             sha256: None,
             mod_id: mod_id.map(str::to_string),
             mod_version: None,
+            mod_name: None,
             url: format!("files/by-hash/{sha1}"),
         }
     }
@@ -633,7 +622,9 @@ mod tests {
         use std::io::Write;
         let mut toml = String::new();
         for id in ids {
-            toml.push_str(&format!("[[mods]]\nmodId=\"{id}\"\nversion=\"1\"\n"));
+            toml.push_str(&format!(
+                "[[mods]]\nmodId=\"{id}\"\nversion=\"1\"\ndisplayName=\"Mod {id}\"\n"
+            ));
         }
         let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         z.start_file(
@@ -667,21 +658,31 @@ mod tests {
 
     #[test]
     fn version_bump_is_an_update_not_add_remove() {
-        let old = man(vec![fe("mods/create-6.0.10.jar", "s10", Some("create"))]);
-        let new = man(vec![fe("mods/create-6.0.11.jar", "s11", Some("create"))]);
+        let named = |path: &str, sha1: &str, version: &str| FileEntry {
+            mod_version: Some(version.into()),
+            mod_name: Some("Create".into()),
+            ..fe(path, sha1, Some("create"))
+        };
+        let old = man(vec![named("mods/create-6.0.10.jar", "s10", "6.0.10")]);
+        let new = man(vec![named("mods/create-6.0.11.jar", "s11", "6.0.11")]);
         let d = diff_manifests(Some(&old), &new);
         assert!(d.added.is_empty() && d.removed.is_empty(), "{d:?}");
         assert_eq!(d.updated.len(), 1);
         assert_eq!(d.updated[0].mod_id, "create");
         assert_eq!(d.updated[0].new_file, "create-6.0.11.jar");
+        assert_eq!(d.updated[0].name.as_deref(), Some("Create"));
+        assert_eq!(d.updated[0].old_version.as_deref(), Some("6.0.10"));
+        assert_eq!(d.updated[0].new_version.as_deref(), Some("6.0.11"));
     }
 
     #[test]
     fn add_remove_change_classified() {
-        let old = man(vec![
-            fe("mods/keep.jar", "k1", Some("keep")),
-            fe("mods/gone.jar", "g1", Some("gone")),
-        ]);
+        let gone = FileEntry {
+            mod_name: Some("Gone Mod".into()),
+            mod_version: Some("1.0".into()),
+            ..fe("mods/gone.jar", "g1", Some("gone"))
+        };
+        let old = man(vec![fe("mods/keep.jar", "k1", Some("keep")), gone]);
         let new = man(vec![
             fe("mods/keep.jar", "k2", Some("keep")),
             fe("mods/new.jar", "n1", Some("new")),
@@ -690,6 +691,18 @@ mod tests {
         assert_eq!(d.added, vec!["mods/new.jar".to_string()]);
         assert_eq!(d.removed, vec!["mods/gone.jar".to_string()]);
         assert_eq!(d.changed, vec!["mods/keep.jar".to_string()]);
+        assert_eq!(
+            d.labels.get("mods/gone.jar"),
+            Some(&EntryLabel {
+                name: Some("Gone Mod".into()),
+                version: Some("1.0".into())
+            }),
+            "removed files are labelled from the old manifest"
+        );
+        assert!(
+            !d.labels.contains_key("mods/new.jar"),
+            "no metadata, no label"
+        );
     }
 
     #[test]
@@ -711,6 +724,8 @@ mod tests {
             .iter()
             .all(|f| f.sha256.as_ref().is_some_and(|s| s.len() == 64)));
         assert_eq!(m.files[0].mod_id.as_deref(), Some("a"));
+        assert_eq!(m.files[0].mod_name.as_deref(), Some("Mod a"));
+        assert_eq!(m.files[0].mod_version.as_deref(), Some("1"));
         assert!(m.files[0]
             .url
             .starts_with("https://cdn.example/main/files/by-hash/"));
@@ -794,17 +809,5 @@ mod tests {
             let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "secret key is owner-only");
         }
-    }
-
-    #[test]
-    fn upload_arguments_are_checked() {
-        assert!(is_plain_arg("deploy@bonegrader.example.com"));
-        assert!(is_plain_arg("/srv/bonegrader"));
-        assert!(!is_plain_arg("host; rm -rf /"));
-        assert!(!is_plain_arg("/srv/x'y"));
-        assert!(!is_plain_arg("-oProxyCommand=evil"));
-        let out = tempfile::Builder::new().tempdir().unwrap();
-        assert!(upload_channel(out.path(), "h", "/srv/$(evil)", "main").is_err());
-        assert!(upload_channel(out.path(), "h", "/srv", "../main").is_err());
     }
 }

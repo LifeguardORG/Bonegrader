@@ -1,17 +1,23 @@
 // Prevent an extra console window on Windows in release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Bonegrader Admin (Tauri v2) — preview and publish channel updates. Thin GUI
-//! over the `bonegrader_publish` library (same logic as the CLI).
+//! Bonegrader Admin (Tauri v2) — preview and publish channel updates, check
+//! the SSH connection, and roll a channel back. Thin GUI over the
+//! `bonegrader_publish` library (same logic as the CLI and deploy scripts).
 
 use std::path::PathBuf;
 
+use bonegrader_client::errors::{Kind, Report};
 use bonegrader_client::http::HttpFetcher;
-use bonegrader_client::session::fetch_manifest;
+use bonegrader_client::session::{fetch_manifest, trusted_keys};
 use bonegrader_core::manifest::{ClientInfo, ServerInfo};
+use bonegrader_core::sign::{PublicKey, SecretKey};
+use bonegrader_publish::remote::{
+    list_history, rollback, test_connection, upload_channel, Connection, HistoryEntry, Remote,
+};
 use bonegrader_publish::{
     build_manifest, category_counts, diff_manifests, gc_store, load_signing_key, populate_store,
-    sign_manifest, upload_channel, write_manifest, BuildOptions, Built, ManifestDiff,
+    sign_manifest, write_manifest, BuildOptions, Built, ManifestDiff,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -91,20 +97,95 @@ impl Settings {
     fn build(&self) -> anyhow::Result<Built> {
         build_manifest(&expand_home(&self.instance), &self.build_options())
     }
+
+    fn key(&self) -> anyhow::Result<Option<SecretKey>> {
+        opt(&self.sign_key)
+            .map(|k| load_signing_key(&expand_home(&k)))
+            .transpose()
+    }
+
+    fn remote(&self) -> anyhow::Result<Remote> {
+        if self.ssh_host.trim().is_empty() || self.remote_base.trim().is_empty() {
+            anyhow::bail!("SSH-Ziel und Remote-Basis angeben");
+        }
+        Remote::new(&self.ssh_host, &self.remote_base)
+    }
+
+    fn target(&self) -> Option<String> {
+        let r = self.remote().ok()?;
+        Some(format!(
+            "{}:{}",
+            r.host(),
+            r.dest(self.channel.trim()).ok()?
+        ))
+    }
 }
 
-/// UI-facing error: the whole `anyhow` chain.
-fn err(e: anyhow::Error) -> String {
-    format!("{e:#}")
+/// How a publish relates to the keys this build's player app trusts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum Signing {
+    /// Signed with a key the player app trusts.
+    Trusted,
+    /// Signed, but the player app does not check signatures yet.
+    SignedUnchecked,
+    /// Not signed, and the player app does not check yet: works, but a
+    /// taken-over web server could ship anything.
+    Unsigned,
+    /// Not signed, but the player app requires a signature: every update
+    /// would be refused.
+    UnsignedRejected,
+    /// Signed with a key the player app does not trust: every update would
+    /// be refused.
+    UntrustedKey,
+}
+
+impl Signing {
+    /// Against the keys compiled into this build (`keys/manifest-signing.pub`).
+    fn check(key: Option<&SecretKey>) -> anyhow::Result<Self> {
+        Ok(Self::against(key, &trusted_keys()?))
+    }
+
+    fn against(key: Option<&SecretKey>, trusted: &[PublicKey]) -> Self {
+        match (key, trusted.is_empty()) {
+            (None, true) => Self::Unsigned,
+            (None, false) => Self::UnsignedRejected,
+            (Some(_), true) => Self::SignedUnchecked,
+            (Some(k), false) if trusted.contains(&k.public()) => Self::Trusted,
+            (Some(_), false) => Self::UntrustedKey,
+        }
+    }
+
+    fn blocks_publishing(self) -> bool {
+        matches!(self, Self::UnsignedRejected | Self::UntrustedKey)
+    }
+}
+
+fn loader_name(t: &str) -> &str {
+    match t {
+        "neoforge" => "NeoForge",
+        "forge" => "Forge",
+        "fabric" => "Fabric",
+        "quilt" => "Quilt",
+        other => other,
+    }
+}
+
+fn report(e: anyhow::Error) -> Report {
+    Report::from(&e)
 }
 
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
-) -> Result<T, String> {
+) -> Result<T, Report> {
     tauri::async_runtime::spawn_blocking(f)
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(err)
+        .map_err(|e| Report {
+            kind: Kind::Other,
+            message: e.to_string(),
+            detail: e.to_string(),
+        })?
+        .map_err(report)
 }
 
 #[derive(Serialize)]
@@ -120,18 +201,22 @@ struct PreviewResult {
     no_mod_id: Vec<String>,
     warnings: Vec<String>,
     loader: String,
+    pack: String,
+    channel: String,
     live_reachable: bool,
-    signed: bool,
+    live_generated_at: Option<String>,
+    signing: Signing,
+    /// `deploy@host:/srv/bonegrader/main`, if the SSH fields are filled in.
+    target: Option<String>,
 }
 
 /// Build the manifest from the instance and diff it against the live server one.
 #[tauri::command]
-async fn preview(settings: Settings) -> Result<PreviewResult, String> {
+async fn preview(settings: Settings) -> Result<PreviewResult, Report> {
     blocking(move || {
         let built = settings.build()?;
-        if let Some(k) = opt(&settings.sign_key) {
-            load_signing_key(&expand_home(&k))?; // fail early on a wrong key path
-        }
+        let key = settings.key()?; // fail early on a wrong key path
+        let signing = Signing::check(key.as_ref())?;
         // Informational only: no signature check needed for the live diff.
         let live = fetch_manifest(&HttpFetcher::new(), settings.base_url.trim(), &[])
             .ok()
@@ -151,10 +236,16 @@ async fn preview(settings: Settings) -> Result<PreviewResult, String> {
             warnings: built.warnings,
             loader: format!(
                 "{} {} (MC {})",
-                l.loader_type, l.loader_version, l.mc_version
+                loader_name(&l.loader_type),
+                l.loader_version,
+                l.mc_version
             ),
+            pack: built.manifest.pack_name.clone(),
+            channel: built.manifest.channel.clone(),
             live_reachable: live.is_some(),
-            signed: opt(&settings.sign_key).is_some(),
+            live_generated_at: live.map(|m| m.generated_at),
+            signing,
+            target: settings.target(),
         })
     })
     .await
@@ -167,24 +258,35 @@ struct PublishResult {
     new_blobs: usize,
     gc_removed: usize,
     signed: bool,
+    /// Where the replaced manifest was saved (for a rollback).
+    previous: Option<String>,
 }
 
 /// Build, populate the local store, sign and rsync the channel to the server.
 #[tauri::command]
-async fn publish(app: AppHandle, settings: Settings) -> Result<PublishResult, String> {
+async fn publish(app: AppHandle, settings: Settings) -> Result<PublishResult, Report> {
     // Per-user folder (a fixed name in a shared temp dir could be tampered with).
     let store_root: PathBuf = app
         .path()
         .app_local_data_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| report(e.into()))?
         .join("publish");
     blocking(move || {
         let phase = |p: &str| {
             let _ = app.emit(PROGRESS_EVENT, p);
         };
-        let key = opt(&settings.sign_key)
-            .map(|k| load_signing_key(&expand_home(&k)))
-            .transpose()?;
+        let remote = settings.remote()?;
+        let key = settings.key()?;
+        let signing = Signing::check(key.as_ref())?;
+        if signing.blocks_publishing() {
+            anyhow::bail!(
+                "Nicht veröffentlicht: Die Spieler-App würde diesen Stand ablehnen ({}).",
+                match signing {
+                    Signing::UnsignedRejected => "sie verlangt eine Signatur",
+                    _ => "der Schlüssel gehört nicht zu keys/manifest-signing.pub",
+                }
+            );
+        }
 
         phase("build");
         let built = settings.build()?;
@@ -202,12 +304,7 @@ async fn publish(app: AppHandle, settings: Settings) -> Result<PublishResult, St
         }
 
         phase("upload");
-        upload_channel(
-            &out,
-            settings.ssh_host.trim(),
-            settings.remote_base.trim(),
-            &channel,
-        )?;
+        let previous = upload_channel(&out, &remote, &channel)?;
 
         let gc_removed = if settings.gc {
             gc_store(&out, &built.manifest)?
@@ -220,14 +317,72 @@ async fn publish(app: AppHandle, settings: Settings) -> Result<PublishResult, St
             new_blobs,
             gc_removed,
             signed: key.is_some(),
+            previous,
         })
     })
     .await
 }
 
+/// Log in without prompting and check what an upload needs.
+#[tauri::command]
+async fn ssh_test(settings: Settings) -> Result<Connection, Report> {
+    blocking(move || test_connection(&settings.remote()?)).await
+}
+
+/// The channel's live manifest and its history, newest first.
+#[tauri::command]
+async fn history(settings: Settings) -> Result<Vec<HistoryEntry>, Report> {
+    blocking(move || list_history(&settings.remote()?, settings.channel.trim())).await
+}
+
+/// Switch the channel back to a history entry; returns where the replaced
+/// manifest was saved.
+#[tauri::command]
+async fn rollback_to(settings: Settings, name: String) -> Result<String, Report> {
+    blocking(move || rollback(&settings.remote()?, settings.channel.trim(), &name)).await
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![preview, publish])
+        .invoke_handler(tauri::generate_handler![
+            preview,
+            publish,
+            ssh_test,
+            history,
+            rollback_to
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Bonegrader Admin");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signing_is_checked_against_the_trusted_keys() {
+        let a = SecretKey::generate().unwrap();
+        let b = SecretKey::generate().unwrap();
+        let trusted = [a.public()];
+        assert_eq!(Signing::against(None, &[]), Signing::Unsigned);
+        assert_eq!(Signing::against(Some(&a), &[]), Signing::SignedUnchecked);
+        assert_eq!(Signing::against(Some(&a), &trusted), Signing::Trusted);
+        assert_eq!(Signing::against(None, &trusted), Signing::UnsignedRejected);
+        assert_eq!(Signing::against(Some(&b), &trusted), Signing::UntrustedKey);
+        assert!(Signing::UnsignedRejected.blocks_publishing());
+        assert!(Signing::UntrustedKey.blocks_publishing());
+        assert!(!Signing::Unsigned.blocks_publishing());
+    }
+
+    #[test]
+    fn remote_targets_need_both_fields() {
+        let mut s: Settings = serde_json::from_value(serde_json::json!({
+            "instance": "/x", "channel": "main", "baseUrl": "https://h/main", "pack": "P",
+            "sshHost": "deploy@h", "remoteBase": "/srv/bonegrader/"
+        }))
+        .unwrap();
+        assert_eq!(s.target().as_deref(), Some("deploy@h:/srv/bonegrader/main"));
+        s.remote_base = String::new();
+        assert!(s.remote().is_err() && s.target().is_none());
+    }
 }

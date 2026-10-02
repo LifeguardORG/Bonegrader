@@ -96,6 +96,7 @@ mod tests {
                 sha256: None,
                 mod_id: None,
                 mod_version: None,
+                mod_name: None,
                 url: "u".into(),
             },
             replaces: replaces.map(str::to_string),

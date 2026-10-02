@@ -7,52 +7,82 @@
 //! headless CLI uses ([`bonegrader_client::session`]). Blocking work (HTTP,
 //! hashing, filesystem) runs off the UI thread via `spawn_blocking`, and
 //! download/apply progress is streamed to the frontend through the
-//! `update-progress` event. Errors reach the UI with their full cause chain.
+//! `update-progress` event. Errors reach the UI classified
+//! ([`errors::Report`]), so it can explain them in plain words.
+//!
+//! While an update, undo or loader install runs, closing the window is held
+//! back and the UI is asked (`close-requested`) — interrupting the commit
+//! phase would leave a half-applied update behind.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use bonegrader_client::apply::{ApplyOptions, Progress};
 use bonegrader_client::detect::{
     default_dotminecraft, discover_all, DetectedInstance, LauncherKind,
 };
+use bonegrader_client::errors::{Kind, Report};
 use bonegrader_client::exec::Decisions;
 use bonegrader_client::fetch::check_url;
 use bonegrader_client::http::HttpFetcher;
 use bonegrader_client::install;
 use bonegrader_client::session::{
     client_compat, fetch_manifest, now_rfc3339, restorable, timestamp, trusted_keys, undo_last,
-    ClientCompat, FetchedManifest, Restorable, SignatureStatus, StaleManifest, Updater,
-    CLIENT_VERSION,
+    ClientCompat, FetchedManifest, Restorable, SignatureStatus, Updater, CLIENT_VERSION,
 };
 use bonegrader_core::manifest::{Loader, ServerInfo};
 use bonegrader_core::paths::is_safe_component;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 const PROGRESS_EVENT: &str = "update-progress";
-/// Prefix of the error the UI answers with a fresh check (see `main.js`).
-const STALE_PREFIX: &str = "[stale] ";
+/// Sent when the window should close while work is running (see `main.js`).
+const CLOSE_EVENT: &str = "close-requested";
 
-/// UI-facing error: the whole `anyhow` chain ("context: cause: cause"). A
-/// plan that went stale is marked so the UI can re-check automatically.
-fn err(e: anyhow::Error) -> String {
-    if e.downcast_ref::<StaleManifest>().is_some() {
-        format!("{STALE_PREFIX}{e}")
-    } else {
-        format!("{e:#}")
+/// Shared between the commands and the window-close guard.
+#[derive(Default)]
+struct AppState {
+    /// Set by `cancel_update`, read by the running update.
+    cancel: Arc<AtomicBool>,
+    /// An update, undo or loader install is running.
+    busy: Arc<AtomicBool>,
+}
+
+/// Marks the app busy until dropped.
+struct BusyGuard(Arc<AtomicBool>);
+
+impl BusyGuard {
+    fn new(state: &AppState) -> Self {
+        state.busy.store(true, Ordering::SeqCst);
+        Self(state.busy.clone())
     }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+fn report(e: anyhow::Error) -> Report {
+    Report::from(&e)
 }
 
 /// Run blocking work off the UI thread.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
-) -> Result<T, String> {
+) -> Result<T, Report> {
     tauri::async_runtime::spawn_blocking(f)
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(err)
+        .map_err(|e| Report {
+            kind: Kind::Other,
+            message: e.to_string(),
+            detail: e.to_string(),
+        })?
+        .map_err(report)
 }
 
 fn fetch(base_url: &str) -> anyhow::Result<FetchedManifest> {
@@ -66,16 +96,28 @@ fn app_version() -> &'static str {
 
 /// Open a download page in the system browser (HTTPS only).
 #[tauri::command]
-fn open_url(app: AppHandle, url: String) -> Result<(), String> {
-    check_url(&url).map_err(|e| e.to_string())?;
+fn open_url(app: AppHandle, url: String) -> Result<(), Report> {
+    check_url(&url).map_err(|e| report(e.into()))?;
     app.opener()
         .open_url(url, None::<&str>)
-        .map_err(|e| e.to_string())
+        .map_err(|e| report(e.into()))
+}
+
+/// Show a folder (backup, instance) in the file manager. Directories only:
+/// "opening" a file could run it.
+#[tauri::command]
+fn open_folder(app: AppHandle, path: String) -> Result<(), Report> {
+    if !Path::new(&path).is_dir() {
+        return Err(report(anyhow::anyhow!("Ordner nicht gefunden: {path}")));
+    }
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| report(e.into()))
 }
 
 /// List every instance we can auto-detect.
 #[tauri::command]
-async fn detect_instances() -> Result<Vec<DetectedInstance>, String> {
+async fn detect_instances() -> Result<Vec<DetectedInstance>, Report> {
     blocking(|| Ok(discover_all())).await
 }
 
@@ -94,7 +136,7 @@ struct ManifestInfo {
 
 /// Check the channel URL and describe what it publishes.
 #[tauri::command]
-async fn manifest_info(base_url: String) -> Result<ManifestInfo, String> {
+async fn manifest_info(base_url: String) -> Result<ManifestInfo, Report> {
     blocking(move || {
         let f = fetch(&base_url)?;
         let m = f.manifest;
@@ -115,7 +157,7 @@ async fn manifest_info(base_url: String) -> Result<ManifestInfo, String> {
 /// Compute (but don't apply) the update for an instance against a channel.
 /// Returns the plan view plus the update that could be undone, if any.
 #[tauri::command]
-async fn plan_update(instance: String, base_url: String) -> Result<serde_json::Value, String> {
+async fn plan_update(instance: String, base_url: String) -> Result<serde_json::Value, Report> {
     blocking(move || {
         let inst = PathBuf::from(&instance);
         let fetcher = HttpFetcher::new();
@@ -153,12 +195,16 @@ struct ApplyResult {
 #[tauri::command]
 async fn apply_update(
     app: AppHandle,
+    state: State<'_, AppState>,
     instance: String,
     base_url: String,
     manifest_id: String,
     remove_extras: Vec<String>,
     keep_collisions: Vec<String>,
-) -> Result<ApplyResult, String> {
+) -> Result<ApplyResult, Report> {
+    let _busy = BusyGuard::new(&state);
+    state.cancel.store(false, Ordering::SeqCst);
+    let cancel = state.cancel.clone();
     blocking(move || {
         let inst = PathBuf::from(&instance);
         let fetcher = HttpFetcher::new();
@@ -176,10 +222,14 @@ async fn apply_update(
         let progress = |p: &Progress| {
             let _ = app.emit(PROGRESS_EVENT, p);
         };
+        let opts = ApplyOptions {
+            cancel: Some(cancel),
+            ..ApplyOptions::default()
+        };
         let outcome = up.apply_checked(
             Some(&manifest_id),
             &decisions,
-            &ApplyOptions::default(),
+            &opts,
             &timestamp(),
             &progress,
         )?;
@@ -208,9 +258,23 @@ struct UndoResult {
     next: Option<Restorable>,
 }
 
+/// Stop a running update while it is still downloading (nothing has been
+/// changed then). Ignored once the update writes to the instance.
+#[tauri::command]
+fn cancel_update(state: State<'_, AppState>) {
+    state.cancel.store(true, Ordering::SeqCst);
+}
+
+/// Quit after the UI dealt with a close request (work finished or cancelled).
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 /// Undo the last update of an instance.
 #[tauri::command]
-async fn undo_update(instance: String) -> Result<UndoResult, String> {
+async fn undo_update(state: State<'_, AppState>, instance: String) -> Result<UndoResult, Report> {
+    let _busy = BusyGuard::new(&state);
     blocking(move || {
         let inst = PathBuf::from(&instance);
         let r = undo_last(&inst, &timestamp())?;
@@ -226,7 +290,7 @@ async fn undo_update(instance: String) -> Result<UndoResult, String> {
 
 /// Native folder picker (instead of typing a path).
 #[tauri::command]
-async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, Report> {
     blocking(move || {
         Ok(app
             .dialog()
@@ -242,7 +306,7 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
 /// `.minecraft` (instead of mixing the pack's mods into `.minecraft/mods`).
 /// Installing NeoForge then binds a launcher profile to it.
 #[tauri::command]
-async fn create_instance(pack_name: String) -> Result<DetectedInstance, String> {
+async fn create_instance(pack_name: String) -> Result<DetectedInstance, Report> {
     blocking(move || {
         let dotmc = default_dotminecraft()
             .ok_or_else(|| anyhow::anyhow!(".minecraft-Ordner nicht gefunden"))?;
@@ -299,7 +363,8 @@ struct LoaderStatus {
     installed_version: Option<String>,
 }
 
-/// Compare the selected instance's loader against the pack's required loader.
+/// Compare the selected instance's loader against the pack's required loader
+/// (`required`, from the plan the player is looking at).
 ///
 /// This runs for *every* launcher type, so a wrong or missing NeoForge version
 /// is reported instead of silently ignored — including for CurseForge, Prism
@@ -308,14 +373,12 @@ struct LoaderStatus {
 /// mismatch so the player can fix it in their launcher.
 #[tauri::command]
 async fn loader_status(
-    base_url: String,
+    required: Loader,
     launcher: String,
     loader_type: Option<String>,
     loader_version: Option<String>,
-) -> Result<LoaderStatus, String> {
+) -> Result<LoaderStatus, Report> {
     blocking(move || {
-        let required = fetch(&base_url)?.manifest.loader;
-
         let is_vanilla = launcher.eq_ignore_ascii_case("vanilla");
         let required_neoforge = required.loader_type.eq_ignore_ascii_case("neoforge");
         let can_install = is_vanilla && required_neoforge;
@@ -379,11 +442,13 @@ async fn loader_status(
 /// leaving their selected (vanilla) profile untouched and adding a duplicate.
 #[tauri::command]
 async fn install_loader(
+    state: State<'_, AppState>,
     base_url: String,
     game_dir: String,
     pack_name: String,
     profile_key: Option<String>,
-) -> Result<bool, String> {
+) -> Result<bool, Report> {
+    let _busy = BusyGuard::new(&state);
     blocking(move || {
         let dotmc = default_dotminecraft()
             .ok_or_else(|| anyhow::anyhow!(".minecraft-Ordner nicht gefunden"))?;
@@ -405,23 +470,48 @@ async fn install_loader(
     .await
 }
 
+fn is_busy(app: &AppHandle) -> bool {
+    app.state::<AppState>().busy.load(Ordering::SeqCst)
+}
+
 fn main() {
     tauri::Builder::default()
+        .manage(AppState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if is_busy(window.app_handle()) {
+                    api.prevent_close();
+                    let _ = window.emit(CLOSE_EVENT, ());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             app_version,
             open_url,
+            open_folder,
             detect_instances,
             manifest_info,
             plan_update,
             apply_update,
+            cancel_update,
+            quit_app,
             undo_update,
             pick_folder,
             create_instance,
             loader_status,
             install_loader
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Bonegrader");
+        .build(tauri::generate_context!())
+        .expect("error while building Bonegrader")
+        .run(|app, event| {
+            // Cmd+Q / quitting from the dock bypasses the window close.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() && is_busy(app) {
+                    api.prevent_exit();
+                    let _ = app.emit(CLOSE_EVENT, ());
+                }
+            }
+        });
 }

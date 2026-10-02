@@ -15,6 +15,7 @@ use bonegrader_core::manifest::Category;
 
 pub mod apply;
 pub mod detect;
+pub mod errors;
 pub mod exec;
 pub mod fetch;
 #[cfg(feature = "http")]

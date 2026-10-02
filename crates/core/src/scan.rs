@@ -29,14 +29,31 @@ pub struct LocalFile {
     /// Mod ids (mods only; empty otherwise or for metadata-less libs).
     pub mod_ids: Vec<String>,
     pub mod_version: Option<String>,
+    /// The primary mod's display name, if the jar declares one.
+    pub mod_name: Option<String>,
 }
 
+/// Bumped whenever [`CachedFile`] gains data older entries lack, so they are
+/// re-read once instead of being served incomplete.
+const CACHE_VERSION: u32 = 2;
+
 /// Hashes and mod metadata of previously scanned files.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanCache {
     #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
     pub entries: BTreeMap<String, CachedFile>,
+}
+
+impl Default for ScanCache {
+    fn default() -> Self {
+        Self {
+            version: CACHE_VERSION,
+            entries: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +66,8 @@ pub struct CachedFile {
     pub mod_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mod_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_name: Option<String>,
 }
 
 /// Scan the given categories under `instance_dir` without a cache.
@@ -69,6 +88,9 @@ pub fn scan_instance_cached(
     categories: &[Category],
     cache: &mut ScanCache,
 ) -> io::Result<Vec<LocalFile>> {
+    if cache.version != CACHE_VERSION {
+        *cache = ScanCache::default();
+    }
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for &cat in categories {
@@ -96,18 +118,16 @@ pub fn scan_instance_cached(
                 .as_ref()
                 .and_then(|fp| cache.entries.get(&rel).filter(|c| &c.fingerprint == fp))
                 .cloned();
-            let (sha1, mod_ids, mod_version) = match hit {
-                Some(c) => (c.sha1, c.mod_ids, c.mod_version),
+            let (sha1, mod_ids, mod_version, mod_name) = match hit {
+                Some(c) => (c.sha1, c.mod_ids, c.mod_version, c.mod_name),
                 None => {
                     let sha1 = sha1_file(&p).map_err(|e| with_path(e, &p))?;
-                    let (ids, version) = if cat == Category::Mod {
-                        read_mod_info(&p)
-                            .map(|mi| (mi.mod_ids, mi.version))
-                            .unwrap_or_default()
+                    let info = if cat == Category::Mod {
+                        read_mod_info(&p).unwrap_or_default()
                     } else {
-                        (Vec::new(), None)
+                        Default::default()
                     };
-                    (sha1, ids, version)
+                    (sha1, info.mod_ids, info.version, info.display_name)
                 }
             };
             if let Some(fingerprint) = fp {
@@ -118,6 +138,7 @@ pub fn scan_instance_cached(
                         sha1: sha1.clone(),
                         mod_ids: mod_ids.clone(),
                         mod_version: mod_version.clone(),
+                        mod_name: mod_name.clone(),
                     },
                 );
             }
@@ -130,6 +151,7 @@ pub fn scan_instance_cached(
                 sha1,
                 mod_ids,
                 mod_version,
+                mod_name,
             });
         }
     }
@@ -211,7 +233,7 @@ mod tests {
         let inst = tmp("basic");
         let create = jar(&[(
             "META-INF/neoforge.mods.toml",
-            "[[mods]]\nmodId=\"create\"\nversion=\"6.0.10\"\n",
+            "[[mods]]\nmodId=\"create\"\nversion=\"6.0.10\"\ndisplayName=\"Create\"\n",
         )]);
         write(&inst.join("mods/create.jar"), &create);
         write(&inst.join("mods/lib.jar"), &jar(&[("a/B.class", "x")]));
@@ -231,6 +253,7 @@ mod tests {
         let c = &found[0];
         assert_eq!(c.mod_ids, vec!["create".to_string()]);
         assert_eq!(c.mod_version.as_deref(), Some("6.0.10"));
+        assert_eq!(c.mod_name.as_deref(), Some("Create"));
         assert_eq!(c.sha1, sha1_bytes(&create));
         assert_eq!(c.size, create.len() as u64);
         assert!(found[1].mod_ids.is_empty(), "library jar without metadata");
@@ -263,12 +286,36 @@ mod tests {
                 sha1: "s".into(),
                 mod_ids: vec![],
                 mod_version: None,
+                mod_name: None,
             },
         );
         std::fs::remove_file(inst.join("mods/a.jar")).unwrap();
         scan_instance_cached(&inst, &[Category::Mod], &mut cache).unwrap();
         assert!(!cache.entries.contains_key("mods/a.jar"));
         assert!(cache.entries.contains_key("shaderpacks/x.zip"));
+        let _ = std::fs::remove_dir_all(&inst);
+    }
+
+    #[test]
+    fn caches_from_an_older_format_are_read_again() {
+        let inst = tmp("cache-version");
+        write(&inst.join("mods/a.jar"), b"AAAA");
+        let mut cache = ScanCache::default();
+        scan_instance_cached(&inst, &ALL, &mut cache).unwrap();
+        cache.entries.get_mut("mods/a.jar").unwrap().sha1 = "stale".into();
+
+        // A cache written before display names existed has no version field.
+        let mut json = serde_json::to_value(&cache).unwrap();
+        json.as_object_mut().unwrap().remove("version");
+        let mut old: ScanCache = serde_json::from_value(json).unwrap();
+        assert_eq!(old.version, 0);
+        let found = scan_instance_cached(&inst, &ALL, &mut old).unwrap();
+        assert_eq!(
+            found[0].sha1,
+            sha1_bytes(b"AAAA"),
+            "re-read, not served stale"
+        );
+        assert_eq!(old.version, CACHE_VERSION);
         let _ = std::fs::remove_dir_all(&inst);
     }
 

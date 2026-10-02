@@ -52,6 +52,7 @@ if [ -f "$CHANNEL_DIR/manifest.json.sig" ]; then
   SWITCH="mv -f $DEST/manifest.json.sig.tmp $DEST/manifest.json.sig && "
 else
   echo "   note: no manifest.json.sig — this channel is unsigned"
+  SWITCH="rm -f $DEST/manifest.json.sig && "   # an old signature would not match
 fi
 
 echo ">> keeping the previous manifest in history/, switching to the new one"
