@@ -85,7 +85,10 @@ fn build(args: BuildArgs) -> Result<()> {
         eprintln!("  note: no modId for {path} (file-name identity)");
     }
 
-    print_diff(&diff_manifests(load_previous(&args.out).as_ref(), &built.manifest));
+    print_diff(&diff_manifests(
+        load_previous(&args.out).as_ref(),
+        &built.manifest,
+    ));
 
     let (mods, rp, sh) = category_counts(&built.manifest);
     let ign = if built.ignored > 0 {
@@ -111,10 +114,16 @@ fn build(args: BuildArgs) -> Result<()> {
 
     let copied = populate_store(&args.instance, &args.out, &built.local)?;
     write_manifest(&args.out, &built.manifest)?;
-    println!("\nWrote {}/manifest.json ({copied} new blobs).", args.out.display());
+    println!(
+        "\nWrote {}/manifest.json ({copied} new blobs).",
+        args.out.display()
+    );
 
     if args.gc {
-        println!("GC: removed {} orphaned blobs.", gc_store(&args.out, &built.manifest)?);
+        println!(
+            "GC: removed {} orphaned blobs.",
+            gc_store(&args.out, &built.manifest)?
+        );
     }
     Ok(())
 }
@@ -125,7 +134,10 @@ fn load_previous(out: &Path) -> Option<Manifest> {
 
 fn print_diff(d: &ManifestDiff) {
     if d.first_build {
-        println!("No previous manifest — first build ({} files).", d.added.len());
+        println!(
+            "No previous manifest — first build ({} files).",
+            d.added.len()
+        );
         return;
     }
     if d.is_empty() {

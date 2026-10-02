@@ -116,7 +116,10 @@ mod tests {
         let mut d = Decisions::default();
         d.keep_collision_local.insert("mods/jei-old.jar".into());
         let exec = finalize(&plan, &d);
-        assert!(exec.downloads.is_empty(), "kept collision must cancel download");
+        assert!(
+            exec.downloads.is_empty(),
+            "kept collision must cancel download"
+        );
         assert!(!exec.deletions.contains(&"mods/jei-old.jar".to_string()));
     }
 

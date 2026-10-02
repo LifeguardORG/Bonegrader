@@ -31,10 +31,17 @@ pub fn detect_loader(instance_dir: &Path) -> Option<DetectedLoader> {
         .and_then(|x| x.as_str())
         .or_else(|| v.get("gameVersion").and_then(|x| x.as_str()))?
         .to_string();
-    let loader_version = bml.get("forgeVersion").and_then(|x| x.as_str())?.to_string();
+    let loader_version = bml
+        .get("forgeVersion")
+        .and_then(|x| x.as_str())?
+        .to_string();
     let name = bml.get("name").and_then(|x| x.as_str()).unwrap_or_default();
     let loader_type = loader_type_from_name(name).to_string();
-    Some(DetectedLoader { loader_type, mc_version, loader_version })
+    Some(DetectedLoader {
+        loader_type,
+        mc_version,
+        loader_version,
+    })
 }
 
 fn loader_type_from_name(name: &str) -> &'static str {
@@ -96,7 +103,8 @@ pub fn build_manifest(instance: &Path, opts: &BuildOptions) -> Result<Built> {
 
     let ignore: BTreeSet<&str> = opts.ignore.iter().map(String::as_str).collect();
     let before = local.len();
-    local.retain(|lf| !ignore.contains(lf.file_name.as_str()) && !ignore.contains(lf.path.as_str()));
+    local
+        .retain(|lf| !ignore.contains(lf.file_name.as_str()) && !ignore.contains(lf.path.as_str()));
     let ignored = before - local.len();
     local.sort_by(|a, b| a.path.cmp(&b.path));
 
@@ -106,16 +114,30 @@ pub fn build_manifest(instance: &Path, opts: &BuildOptions) -> Result<Built> {
         .map(|lf| lf.path.clone())
         .collect();
 
-    let files = local.iter().map(|lf| build_entry(lf, &opts.base_url)).collect();
+    let files = local
+        .iter()
+        .map(|lf| build_entry(lf, &opts.base_url))
+        .collect();
     let manifest = Manifest {
         schema_version: 1,
         pack_name: opts.pack.clone(),
         channel: opts.channel.clone(),
-        generated_at: OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default(),
-        loader: Loader { loader_type, mc_version, loader_version },
+        generated_at: OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_default(),
+        loader: Loader {
+            loader_type,
+            mc_version,
+            loader_version,
+        },
         files,
     };
-    Ok(Built { manifest, local, ignored, no_modid })
+    Ok(Built {
+        manifest,
+        local,
+        ignored,
+        no_modid,
+    })
 }
 
 fn build_entry(lf: &LocalFile, base_url: &str) -> FileEntry {
@@ -170,7 +192,10 @@ pub struct ManifestDiff {
 
 impl ManifestDiff {
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty() && self.updated.is_empty()
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.changed.is_empty()
+            && self.updated.is_empty()
     }
 }
 
@@ -192,14 +217,24 @@ pub fn diff_manifests(old: Option<&Manifest>, new: &Manifest) -> ManifestDiff {
     let new_by_path: BTreeMap<&str, &FileEntry> =
         new.files.iter().map(|f| (f.path.as_str(), f)).collect();
 
-    let mut added: Vec<&FileEntry> =
-        new.files.iter().filter(|f| !old_by_path.contains_key(f.path.as_str())).collect();
-    let mut removed: Vec<&FileEntry> =
-        old.files.iter().filter(|f| !new_by_path.contains_key(f.path.as_str())).collect();
+    let mut added: Vec<&FileEntry> = new
+        .files
+        .iter()
+        .filter(|f| !old_by_path.contains_key(f.path.as_str()))
+        .collect();
+    let mut removed: Vec<&FileEntry> = old
+        .files
+        .iter()
+        .filter(|f| !new_by_path.contains_key(f.path.as_str()))
+        .collect();
     let changed: Vec<String> = new
         .files
         .iter()
-        .filter(|f| old_by_path.get(f.path.as_str()).is_some_and(|o| o.sha1 != f.sha1))
+        .filter(|f| {
+            old_by_path
+                .get(f.path.as_str())
+                .is_some_and(|o| o.sha1 != f.sha1)
+        })
         .map(|f| f.path.clone())
         .collect();
 
@@ -218,8 +253,16 @@ pub fn diff_manifests(old: Option<&Manifest>, new: &Manifest) -> ManifestDiff {
         }
     }
     let updated_ids: BTreeSet<&str> = updated.iter().map(|u| u.mod_id.as_str()).collect();
-    added.retain(|f| f.mod_id.as_deref().is_none_or(|id| !updated_ids.contains(id)));
-    removed.retain(|f| f.mod_id.as_deref().is_none_or(|id| !updated_ids.contains(id)));
+    added.retain(|f| {
+        f.mod_id
+            .as_deref()
+            .is_none_or(|id| !updated_ids.contains(id))
+    });
+    removed.retain(|f| {
+        f.mod_id
+            .as_deref()
+            .is_none_or(|id| !updated_ids.contains(id))
+    });
 
     ManifestDiff {
         first_build: false,
@@ -243,7 +286,8 @@ fn mods_by_id(m: &Manifest) -> BTreeMap<String, &FileEntry> {
 /// Copy each scanned file into `out/files/by-hash/` if absent. Returns new-blob count.
 pub fn populate_store(instance: &Path, out: &Path, local: &[LocalFile]) -> Result<usize> {
     let store = out.join("files").join("by-hash");
-    std::fs::create_dir_all(&store).with_context(|| format!("creating store {}", store.display()))?;
+    std::fs::create_dir_all(&store)
+        .with_context(|| format!("creating store {}", store.display()))?;
     let mut copied = 0;
     for lf in local {
         let dst = store.join(&lf.sha1);
@@ -252,7 +296,8 @@ pub fn populate_store(instance: &Path, out: &Path, local: &[LocalFile]) -> Resul
         }
         let src = instance.join(&lf.path);
         let tmp = store.join(format!(".{}.tmp", lf.sha1));
-        std::fs::copy(&src, &tmp).with_context(|| format!("copying {} into store", src.display()))?;
+        std::fs::copy(&src, &tmp)
+            .with_context(|| format!("copying {} into store", src.display()))?;
         std::fs::rename(&tmp, &dst)?;
         copied += 1;
     }
@@ -298,7 +343,9 @@ pub fn write_manifest(out: &Path, manifest: &Manifest) -> Result<()> {
 /// (additive, immutable), manifest last (atomic switch). Requires `rsync`/`ssh`.
 pub fn upload_channel(out: &Path, ssh_host: &str, remote_base: &str, channel: &str) -> Result<()> {
     let dest = format!("{remote_base}/{channel}");
-    run(Command::new("ssh").arg(ssh_host).arg(format!("mkdir -p '{dest}/files/by-hash'")))?;
+    run(Command::new("ssh")
+        .arg(ssh_host)
+        .arg(format!("mkdir -p '{dest}/files/by-hash'")))?;
     run(Command::new("rsync")
         .args(["-a", "--ignore-existing"])
         .arg(format!("{}/", out.join("files").display()))
@@ -307,9 +354,9 @@ pub fn upload_channel(out: &Path, ssh_host: &str, remote_base: &str, channel: &s
         .arg("-a")
         .arg(out.join("manifest.json"))
         .arg(format!("{ssh_host}:{dest}/manifest.json.tmp")))?;
-    run(Command::new("ssh")
-        .arg(ssh_host)
-        .arg(format!("mv -f '{dest}/manifest.json.tmp' '{dest}/manifest.json'")))?;
+    run(Command::new("ssh").arg(ssh_host).arg(format!(
+        "mv -f '{dest}/manifest.json.tmp' '{dest}/manifest.json'"
+    )))?;
     Ok(())
 }
 
@@ -344,7 +391,11 @@ mod tests {
             pack_name: "P".into(),
             channel: "main".into(),
             generated_at: "t".into(),
-            loader: Loader { loader_type: "neoforge".into(), mc_version: "1.21.1".into(), loader_version: "21.1.234".into() },
+            loader: Loader {
+                loader_type: "neoforge".into(),
+                mc_version: "1.21.1".into(),
+                loader_version: "21.1.234".into(),
+            },
             files,
         }
     }
@@ -369,8 +420,14 @@ mod tests {
 
     #[test]
     fn add_remove_change_classified() {
-        let old = man(vec![fe("mods/keep.jar", "k1", Some("keep")), fe("mods/gone.jar", "g1", Some("gone"))]);
-        let new = man(vec![fe("mods/keep.jar", "k2", Some("keep")), fe("mods/new.jar", "n1", Some("new"))]);
+        let old = man(vec![
+            fe("mods/keep.jar", "k1", Some("keep")),
+            fe("mods/gone.jar", "g1", Some("gone")),
+        ]);
+        let new = man(vec![
+            fe("mods/keep.jar", "k2", Some("keep")),
+            fe("mods/new.jar", "n1", Some("new")),
+        ]);
         let d = diff_manifests(Some(&old), &new);
         assert_eq!(d.added, vec!["mods/new.jar".to_string()]);
         assert_eq!(d.removed, vec!["mods/gone.jar".to_string()]);

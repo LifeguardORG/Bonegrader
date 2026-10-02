@@ -52,8 +52,11 @@ async fn preview(
     ignore: Vec<String>,
 ) -> Result<PreviewResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<PreviewResult, String> {
-        let built = build_manifest(Path::new(&instance), &opts(pack, channel, base_url.clone(), ignore))
-            .map_err(|e| e.to_string())?;
+        let built = build_manifest(
+            Path::new(&instance),
+            &opts(pack, channel, base_url.clone(), ignore),
+        )
+        .map_err(|e| e.to_string())?;
         let live = fetch_manifest(&base_url).ok();
         let diff = diff_manifests(live.as_ref(), &built.manifest);
         let (mods, resourcepacks, shaderpacks) = category_counts(&built.manifest);
@@ -66,7 +69,10 @@ async fn preview(
             shaderpacks,
             ignored: built.ignored,
             no_mod_id: built.no_modid,
-            loader: format!("{} {} (MC {})", l.loader_type, l.loader_version, l.mc_version),
+            loader: format!(
+                "{} {} (MC {})",
+                l.loader_type, l.loader_version, l.mc_version
+            ),
             live_reachable: live.is_some(),
         })
     })
@@ -102,11 +108,17 @@ async fn publish(
         };
 
         phase("build");
-        let built = build_manifest(Path::new(&instance), &opts(pack, channel.clone(), base_url, ignore))
-            .map_err(|e| e.to_string())?;
+        let built = build_manifest(
+            Path::new(&instance),
+            &opts(pack, channel.clone(), base_url, ignore),
+        )
+        .map_err(|e| e.to_string())?;
 
-        let out = std::env::temp_dir().join("bonegrader-publish").join(&channel);
-        let new_blobs = populate_store(Path::new(&instance), &out, &built.local).map_err(|e| e.to_string())?;
+        let out = std::env::temp_dir()
+            .join("bonegrader-publish")
+            .join(&channel);
+        let new_blobs =
+            populate_store(Path::new(&instance), &out, &built.local).map_err(|e| e.to_string())?;
         write_manifest(&out, &built.manifest).map_err(|e| e.to_string())?;
 
         phase("upload");

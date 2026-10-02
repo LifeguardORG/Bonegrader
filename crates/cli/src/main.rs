@@ -74,7 +74,9 @@ fn main() -> Result<()> {
 }
 
 /// Scan + fetch manifest + compute plan.
-fn prepare(a: &CommonArgs) -> Result<(UpdatePlan, ClientState, bonegrader_core::manifest::Manifest)> {
+fn prepare(
+    a: &CommonArgs,
+) -> Result<(UpdatePlan, ClientState, bonegrader_core::manifest::Manifest)> {
     if !a.instance.is_dir() {
         anyhow::bail!("instance is not a directory: {}", a.instance.display());
     }
@@ -96,7 +98,11 @@ fn run_update(a: UpdateArgs) -> Result<()> {
         decisions.remove_extras = plan.user_extras.iter().cloned().collect();
     }
     if a.keep_collisions {
-        decisions.keep_collision_local = plan.collisions.iter().map(|c| c.local_path.clone()).collect();
+        decisions.keep_collision_local = plan
+            .collisions
+            .iter()
+            .map(|c| c.local_path.clone())
+            .collect();
     }
 
     let exec = finalize(&plan, &decisions);
@@ -142,7 +148,10 @@ fn print_plan(plan: &UpdatePlan) {
         println!("  - remove  {r}");
     }
     for c in &plan.collisions {
-        println!("  ! clash   {} shares modId '{}' with {}", c.local_path, c.mod_id, c.manifest_path);
+        println!(
+            "  ! clash   {} shares modId '{}' with {}",
+            c.local_path, c.mod_id, c.manifest_path
+        );
     }
     for e in &plan.user_extras {
         println!("  = keep    {e}  (your own mod)");

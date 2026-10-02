@@ -64,7 +64,14 @@ pub fn apply(
     timestamp: &str,
 ) -> Result<ApplyReport> {
     apply_with_progress(
-        instance, manifest, exec, fetcher, base_url, old_state, timestamp, &|_| {},
+        instance,
+        manifest,
+        exec,
+        fetcher,
+        base_url,
+        old_state,
+        timestamp,
+        &|_| {},
     )
 }
 
@@ -130,7 +137,9 @@ pub fn apply_with_progress(
     let staged_result = (|| -> Result<()> {
         for d in &exec.downloads {
             let url = resolve_url(base_url, &d.entry.url);
-            let bytes = fetcher.get(&url).with_context(|| format!("fetching {url}"))?;
+            let bytes = fetcher
+                .get(&url)
+                .with_context(|| format!("fetching {url}"))?;
             let got = sha1_bytes(&bytes);
             if got != d.entry.sha1 {
                 bail!(
@@ -197,8 +206,7 @@ pub fn apply_with_progress(
                 backup_used = true;
             }
         }
-        std::fs::rename(tmp_file, &dst)
-            .with_context(|| format!("installing {target}"))?;
+        std::fs::rename(tmp_file, &dst).with_context(|| format!("installing {target}"))?;
     }
     let _ = std::fs::remove_dir_all(&tmp_dir);
 

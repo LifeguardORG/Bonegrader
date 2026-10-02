@@ -74,8 +74,10 @@ pub fn compute_plan(manifest: &Manifest, local: &[LocalFile], state: &ClientStat
         local.iter().map(|l| (l.path.as_str(), l)).collect();
 
     let manifest_paths: HashSet<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
-    let manifest_mod_ids: HashSet<&str> =
-        manifest.mods().filter_map(|f| f.mod_id.as_deref()).collect();
+    let manifest_mod_ids: HashSet<&str> = manifest
+        .mods()
+        .filter_map(|f| f.mod_id.as_deref())
+        .collect();
     let manifest_shas: HashSet<&str> = manifest.files.iter().map(|f| f.sha1.as_str()).collect();
 
     let original_managed: HashSet<String> = state.managed.keys().cloned().collect();
@@ -88,7 +90,10 @@ pub fn compute_plan(manifest: &Manifest, local: &[LocalFile], state: &ClientStat
         for lf in local {
             let by_sha = manifest_shas.contains(lf.sha1.as_str());
             let by_mod = lf.category == Category::Mod
-                && lf.mod_ids.iter().any(|id| manifest_mod_ids.contains(id.as_str()));
+                && lf
+                    .mod_ids
+                    .iter()
+                    .any(|id| manifest_mod_ids.contains(id.as_str()));
             if by_sha || by_mod {
                 managed.insert(lf.path.clone());
             }
@@ -202,10 +207,12 @@ pub fn compute_plan(manifest: &Manifest, local: &[LocalFile], state: &ClientStat
     // --- 5. Finalise ----------------------------------------------------------
     plan.adopted = managed.difference(&original_managed).cloned().collect();
 
-    plan.downloads.sort_by(|a, b| a.entry.path.cmp(&b.entry.path));
+    plan.downloads
+        .sort_by(|a, b| a.entry.path.cmp(&b.entry.path));
     plan.removals.sort();
     plan.user_extras.sort();
-    plan.collisions.sort_by(|a, b| a.local_path.cmp(&b.local_path));
+    plan.collisions
+        .sort_by(|a, b| a.local_path.cmp(&b.local_path));
     plan.adopted.sort();
 
     plan
@@ -312,7 +319,10 @@ mod tests {
         let plan = compute_plan(&man, &local, &st);
         assert_eq!(plan.downloads.len(), 1);
         assert_eq!(plan.downloads[0].replaces.as_deref(), Some("mods/a.jar"));
-        assert!(plan.removals.is_empty(), "replace must not double as removal");
+        assert!(
+            plan.removals.is_empty(),
+            "replace must not double as removal"
+        );
     }
 
     #[test]
@@ -324,7 +334,12 @@ mod tests {
             "s11",
             Some("create"),
         )]);
-        let local = vec![lf(Category::Mod, "mods/create-6.0.10.jar", "s10", &["create"])];
+        let local = vec![lf(
+            Category::Mod,
+            "mods/create-6.0.10.jar",
+            "s10",
+            &["create"],
+        )];
         let st = state(&[("mods/create-6.0.10.jar", "s10", &["create"])]);
         let plan = compute_plan(&man, &local, &st);
         assert_eq!(plan.downloads.len(), 1);
@@ -344,7 +359,10 @@ mod tests {
             lf(Category::Mod, "mods/a.jar", "s1", &["a"]),
             lf(Category::Mod, "mods/old.jar", "s9", &["old"]),
         ];
-        let st = state(&[("mods/a.jar", "s1", &["a"]), ("mods/old.jar", "s9", &["old"])]);
+        let st = state(&[
+            ("mods/a.jar", "s1", &["a"]),
+            ("mods/old.jar", "s9", &["old"]),
+        ]);
         let plan = compute_plan(&man, &local, &st);
         assert_eq!(plan.removals, vec!["mods/old.jar".to_string()]);
         assert!(plan.downloads.is_empty());
@@ -356,28 +374,44 @@ mod tests {
         let man = manifest(vec![fe(Category::Mod, "mods/a.jar", "s1", Some("a"))]);
         let local = vec![
             lf(Category::Mod, "mods/a.jar", "s1", &["a"]),
-            lf(Category::Mod, "mods/myclientmod.jar", "sX", &["myclientmod"]),
+            lf(
+                Category::Mod,
+                "mods/myclientmod.jar",
+                "sX",
+                &["myclientmod"],
+            ),
         ];
         let st = state(&[("mods/a.jar", "s1", &["a"])]);
         let plan = compute_plan(&man, &local, &st);
         assert_eq!(plan.user_extras, vec!["mods/myclientmod.jar".to_string()]);
-        assert!(plan.removals.is_empty(), "user mod must never be auto-removed");
+        assert!(
+            plan.removals.is_empty(),
+            "user mod must never be auto-removed"
+        );
         assert!(plan.collisions.is_empty());
     }
 
     #[test]
     fn duplicate_modid_is_reported_as_collision() {
         // Player manually added their own (older) JEI; the pack manages JEI too.
-        let man = manifest(vec![fe(Category::Mod, "mods/jei-19.5.jar", "s195", Some("jei"))]);
+        let man = manifest(vec![fe(
+            Category::Mod,
+            "mods/jei-19.5.jar",
+            "s195",
+            Some("jei"),
+        )]);
         let local = vec![lf(Category::Mod, "mods/jei-19.0.jar", "s190", &["jei"])];
         let st = state(&[]); // first run, but jei modId matches -> adopted? see note
-        // Force non-first-run so the local jei stays unmanaged and collides.
+                             // Force non-first-run so the local jei stays unmanaged and collides.
         let st = ClientState {
             managed: {
                 let mut m = BTreeMap::new();
                 m.insert(
                     "mods/placeholder.jar".into(),
-                    ManagedEntry { sha1: "z".into(), mod_ids: vec!["placeholder".into()] },
+                    ManagedEntry {
+                        sha1: "z".into(),
+                        mod_ids: vec!["placeholder".into()],
+                    },
                 );
                 m
             },
@@ -389,7 +423,10 @@ mod tests {
         assert_eq!(plan.collisions[0].mod_id, "jei");
         assert_eq!(plan.collisions[0].manifest_path, "mods/jei-19.5.jar");
         // The pack version is still scheduled to download.
-        assert!(plan.downloads.iter().any(|d| d.entry.path == "mods/jei-19.5.jar"));
+        assert!(plan
+            .downloads
+            .iter()
+            .any(|d| d.entry.path == "mods/jei-19.5.jar"));
         // And the colliding user mod is NOT silently in extras.
         assert!(plan.user_extras.is_empty());
     }
@@ -400,12 +437,17 @@ mod tests {
         // outdated mod and one genuinely personal mod.
         let man = manifest(vec![
             fe(Category::Mod, "mods/a.jar", "s1", Some("a")),
-            fe(Category::Mod, "mods/create-6.0.11.jar", "s11", Some("create")),
+            fe(
+                Category::Mod,
+                "mods/create-6.0.11.jar",
+                "s11",
+                Some("create"),
+            ),
         ]);
         let local = vec![
             lf(Category::Mod, "mods/a.jar", "s1", &["a"]), // exact match -> adopt
             lf(Category::Mod, "mods/create-6.0.10.jar", "s10", &["create"]), // old ver -> adopt+bump
-            lf(Category::Mod, "mods/personal.jar", "sP", &["personal"]), // extra
+            lf(Category::Mod, "mods/personal.jar", "sP", &["personal"]),     // extra
         ];
         let st = ClientState::default(); // is_first_run == true
         let plan = compute_plan(&man, &local, &st);
@@ -433,22 +475,38 @@ mod tests {
         let plan = compute_plan(&man, &local, &ClientState::default());
         assert_eq!(plan.downloads.len(), 1);
         assert_eq!(plan.downloads[0].replaces.as_deref(), Some("mods/lib.jar"));
-        assert!(plan.user_extras.is_empty(), "must not be listed as an extra");
+        assert!(
+            plan.user_extras.is_empty(),
+            "must not be listed as an extra"
+        );
     }
 
     #[test]
     fn resource_and_shader_packs_are_never_in_extras() {
         // An unmanaged local pack the server doesn't ship is kept silently.
-        let man = manifest(vec![fe(Category::Resourcepack, "resourcepacks/pack.zip", "s1", None)]);
+        let man = manifest(vec![fe(
+            Category::Resourcepack,
+            "resourcepacks/pack.zip",
+            "s1",
+            None,
+        )]);
         let local = vec![
             lf(Category::Resourcepack, "resourcepacks/pack.zip", "s1", &[]),
-            lf(Category::Resourcepack, "resourcepacks/mypersonal.zip", "sX", &[]),
+            lf(
+                Category::Resourcepack,
+                "resourcepacks/mypersonal.zip",
+                "sX",
+                &[],
+            ),
             lf(Category::Shaderpack, "shaderpacks/myshader.zip", "sY", &[]),
         ];
         let st = state(&[("resourcepacks/pack.zip", "s1", &[])]);
         let plan = compute_plan(&man, &local, &st);
         assert!(plan.is_noop(), "{plan:?}");
-        assert!(plan.user_extras.is_empty(), "packs are never listed as extras");
+        assert!(
+            plan.user_extras.is_empty(),
+            "packs are never listed as extras"
+        );
     }
 
     #[test]

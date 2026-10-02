@@ -26,11 +26,7 @@ use time::OffsetDateTime;
 
 const STATE_FILE: &str = ".bonegrader-state.json";
 const PROGRESS_EVENT: &str = "update-progress";
-const CATEGORIES: [Category; 3] = [
-    Category::Mod,
-    Category::Resourcepack,
-    Category::Shaderpack,
-];
+const CATEGORIES: [Category; 3] = [Category::Mod, Category::Resourcepack, Category::Shaderpack];
 
 /// List every instance we can auto-detect.
 #[tauri::command]
@@ -221,7 +217,11 @@ async fn loader_status(
             "ok"
         } else if loader_type.is_none() && loader_version.is_none() {
             // No loader recorded for the instance at all.
-            if is_vanilla { "missing" } else { "unknown" }
+            if is_vanilla {
+                "missing"
+            } else {
+                "unknown"
+            }
         } else if !can_install {
             // We can see the mismatch but can't fix it (CurseForge / non-NeoForge).
             "unmanaged"
@@ -262,10 +262,17 @@ async fn install_loader(
     profile_key: Option<String>,
 ) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
-        let dotmc = default_dotminecraft().ok_or_else(|| ".minecraft-Ordner nicht gefunden".to_string())?;
-        let loader_version = fetch_manifest(&base_url).map_err(|e| e.to_string())?.loader.loader_version;
+        let dotmc =
+            default_dotminecraft().ok_or_else(|| ".minecraft-Ordner nicht gefunden".to_string())?;
+        let loader_version = fetch_manifest(&base_url)
+            .map_err(|e| e.to_string())?
+            .loader
+            .loader_version;
         let fetcher = HttpFetcher::new();
-        let key = profile_key.as_deref().filter(|k| !k.is_empty()).unwrap_or("bonegrader");
+        let key = profile_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .unwrap_or("bonegrader");
         install::ensure_client(
             &dotmc,
             &loader_version,
@@ -282,7 +289,9 @@ async fn install_loader(
 }
 
 fn now_iso() -> String {
-    OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default()
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_default()
 }
 
 fn main() {

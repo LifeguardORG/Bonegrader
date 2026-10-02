@@ -25,37 +25,61 @@ fn version_id(loader_version: &str) -> String {
 /// True if the launcher already has this NeoForge version installed.
 pub fn is_installed(dotmc: &Path, loader_version: &str) -> bool {
     let id = version_id(loader_version);
-    dotmc.join("versions").join(&id).join(format!("{id}.json")).is_file()
+    dotmc
+        .join("versions")
+        .join(&id)
+        .join(format!("{id}.json"))
+        .is_file()
 }
 
 const fn java_exe() -> &'static str {
-    if cfg!(windows) { "java.exe" } else { "java" }
+    if cfg!(windows) {
+        "java.exe"
+    } else {
+        "java"
+    }
 }
 
 fn java_runs(exe: &Path) -> bool {
-    Command::new(exe).arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new(exe)
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Locate a usable Java: `JAVA_HOME`, then `PATH`, then a launcher-bundled runtime.
 pub fn find_java(dotmc: &Path) -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("JAVA_HOME") {
         let exe = Path::new(&home).join("bin").join(java_exe());
-        if java_runs(&exe) { return Some(exe); }
+        if java_runs(&exe) {
+            return Some(exe);
+        }
     }
     let on_path = PathBuf::from(java_exe());
-    if java_runs(&on_path) { return Some(on_path); }
+    if java_runs(&on_path) {
+        return Some(on_path);
+    }
     find_bundled_java(&dotmc.join("runtime"), 6)
 }
 
 // Mojang stores runtimes at runtime/<name>/<os>/<name>/bin/java(.exe).
 fn find_bundled_java(dir: &Path, depth: u8) -> Option<PathBuf> {
-    if depth == 0 { return None; }
+    if depth == 0 {
+        return None;
+    }
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let p = entry.path();
-        if !p.is_dir() { continue; }
+        if !p.is_dir() {
+            continue;
+        }
         let candidate = p.join("bin").join(java_exe());
-        if candidate.is_file() && java_runs(&candidate) { return Some(candidate); }
-        if let Some(found) = find_bundled_java(&p, depth - 1) { return Some(found); }
+        if candidate.is_file() && java_runs(&candidate) {
+            return Some(candidate);
+        }
+        if let Some(found) = find_bundled_java(&p, depth - 1) {
+            return Some(found);
+        }
     }
     None
 }
@@ -73,7 +97,9 @@ pub fn upsert_profile(
 ) -> Result<String> {
     let mut root: Value =
         serde_json::from_str(profiles_json).context("parsing launcher_profiles.json")?;
-    let obj = root.as_object_mut().context("launcher_profiles.json root is not an object")?;
+    let obj = root
+        .as_object_mut()
+        .context("launcher_profiles.json root is not an object")?;
     let profiles = obj
         .entry("profiles")
         .or_insert_with(|| Value::Object(Map::new()))
@@ -89,9 +115,18 @@ pub fn upsert_profile(
     let mut profile = Map::new();
     profile.insert("name".into(), Value::String(name.into()));
     profile.insert("type".into(), Value::String("custom".into()));
-    profile.insert("created".into(), Value::String(existing_created.unwrap_or_else(|| created.into())));
-    profile.insert("lastVersionId".into(), Value::String(version_id(loader_version)));
-    profile.insert("gameDir".into(), Value::String(game_dir.to_string_lossy().into_owned()));
+    profile.insert(
+        "created".into(),
+        Value::String(existing_created.unwrap_or_else(|| created.into())),
+    );
+    profile.insert(
+        "lastVersionId".into(),
+        Value::String(version_id(loader_version)),
+    );
+    profile.insert(
+        "gameDir".into(),
+        Value::String(game_dir.to_string_lossy().into_owned()),
+    );
     profiles.insert(profile_key.into(), Value::Object(profile));
 
     serde_json::to_string_pretty(&root).context("serializing launcher_profiles.json")
@@ -136,7 +171,9 @@ pub fn run_installer(
     java: &Path,
 ) -> Result<()> {
     let url = installer_url(loader_version);
-    let bytes = fetcher.get(&url).with_context(|| format!("downloading {url}"))?;
+    let bytes = fetcher
+        .get(&url)
+        .with_context(|| format!("downloading {url}"))?;
     let jar = std::env::temp_dir().join(format!("neoforge-{loader_version}-installer.jar"));
     std::fs::write(&jar, &bytes).context("writing installer to temp")?;
 
@@ -190,7 +227,14 @@ pub fn ensure_client(
     // Tolerate a missing profiles file by starting from an empty object.
     let profiles_path = dotmc.join("launcher_profiles.json");
     let text = std::fs::read_to_string(&profiles_path).unwrap_or_else(|_| "{}".to_string());
-    let updated = upsert_profile(&text, profile_key, profile_name, loader_version, game_dir, created)?;
+    let updated = upsert_profile(
+        &text,
+        profile_key,
+        profile_name,
+        loader_version,
+        game_dir,
+        created,
+    )?;
     // When we bound the loader to a real profile, drop any leftover auto-created
     // `bonegrader` duplicate for the same game dir so the launcher shows it once.
     let updated = prune_duplicate_auto_profile(&updated, profile_key, game_dir)?;
@@ -231,22 +275,64 @@ mod tests {
             "settings": { "enableSnapshots": false },
             "version": 3
         }"#;
-        let out = upsert_profile(input, "bonegrader", "BonesAndBees", "21.1.234", Path::new("/home/p/.minecraft/bab"), "2026-07-27T00:00:00Z").unwrap();
+        let out = upsert_profile(
+            input,
+            "bonegrader",
+            "BonesAndBees",
+            "21.1.234",
+            Path::new("/home/p/.minecraft/bab"),
+            "2026-07-27T00:00:00Z",
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["profiles"]["vanilla"]["name"], "Latest", "existing profile kept");
-        assert_eq!(v["settings"]["enableSnapshots"], false, "top-level keys kept");
-        assert_eq!(v["profiles"]["bonegrader"]["lastVersionId"], "neoforge-21.1.234");
-        assert_eq!(v["profiles"]["bonegrader"]["gameDir"], "/home/p/.minecraft/bab");
+        assert_eq!(
+            v["profiles"]["vanilla"]["name"], "Latest",
+            "existing profile kept"
+        );
+        assert_eq!(
+            v["settings"]["enableSnapshots"], false,
+            "top-level keys kept"
+        );
+        assert_eq!(
+            v["profiles"]["bonegrader"]["lastVersionId"],
+            "neoforge-21.1.234"
+        );
+        assert_eq!(
+            v["profiles"]["bonegrader"]["gameDir"],
+            "/home/p/.minecraft/bab"
+        );
         assert_eq!(v["profiles"]["bonegrader"]["name"], "BonesAndBees");
     }
 
     #[test]
     fn upsert_preserves_created_on_update() {
-        let first = upsert_profile("{}", "bonegrader", "BonesAndBees", "21.1.234", Path::new("/a"), "FIRST").unwrap();
-        let second = upsert_profile(&first, "bonegrader", "BonesAndBees", "21.1.238", Path::new("/b"), "SECOND").unwrap();
+        let first = upsert_profile(
+            "{}",
+            "bonegrader",
+            "BonesAndBees",
+            "21.1.234",
+            Path::new("/a"),
+            "FIRST",
+        )
+        .unwrap();
+        let second = upsert_profile(
+            &first,
+            "bonegrader",
+            "BonesAndBees",
+            "21.1.238",
+            Path::new("/b"),
+            "SECOND",
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&second).unwrap();
-        assert_eq!(v["profiles"]["bonegrader"]["created"], "FIRST", "created timestamp kept across updates");
-        assert_eq!(v["profiles"]["bonegrader"]["lastVersionId"], "neoforge-21.1.238", "version updated");
+        assert_eq!(
+            v["profiles"]["bonegrader"]["created"], "FIRST",
+            "created timestamp kept across updates"
+        );
+        assert_eq!(
+            v["profiles"]["bonegrader"]["lastVersionId"], "neoforge-21.1.238",
+            "version updated"
+        );
         assert_eq!(v["profiles"]["bonegrader"]["gameDir"], "/b");
     }
 
@@ -263,16 +349,25 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v["profiles"]["bonegrader"].is_null(), "duplicate removed");
         assert!(!v["profiles"]["52fdc"].is_null(), "real profile kept");
-        assert!(!v["profiles"]["latest-release"].is_null(), "unrelated profiles kept");
+        assert!(
+            !v["profiles"]["latest-release"].is_null(),
+            "unrelated profiles kept"
+        );
 
         // On the manual/CurseForge path we *are* the auto profile — keep it.
         let keep = prune_duplicate_auto_profile(input, "bonegrader", Path::new("/mc")).unwrap();
         let vk: Value = serde_json::from_str(&keep).unwrap();
-        assert!(!vk["profiles"]["bonegrader"].is_null(), "auto profile kept on manual path");
+        assert!(
+            !vk["profiles"]["bonegrader"].is_null(),
+            "auto profile kept on manual path"
+        );
 
         // A `bonegrader` profile for a different game dir is not our duplicate.
         let other = prune_duplicate_auto_profile(input, "52fdc", Path::new("/elsewhere")).unwrap();
         let vo: Value = serde_json::from_str(&other).unwrap();
-        assert!(!vo["profiles"]["bonegrader"].is_null(), "different gameDir not pruned");
+        assert!(
+            !vo["profiles"]["bonegrader"].is_null(),
+            "different gameDir not pruned"
+        );
     }
 }

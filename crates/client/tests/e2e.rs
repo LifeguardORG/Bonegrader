@@ -117,10 +117,13 @@ fn full_update_cycle_preserves_user_mod_and_backs_up_replacements() {
         ..Default::default()
     };
     state.managed.insert("mods/a.jar".into(), managed(a, "a"));
+    state.managed.insert(
+        "mods/create-6.0.10.jar".into(),
+        managed(create_old, "create"),
+    );
     state
         .managed
-        .insert("mods/create-6.0.10.jar".into(), managed(create_old, "create"));
-    state.managed.insert("mods/stale.jar".into(), managed(stale, "stale"));
+        .insert("mods/stale.jar".into(), managed(stale, "stale"));
 
     // ---- what the client scanned on disk right now ----
     let scanned = vec![
@@ -132,7 +135,11 @@ fn full_update_cycle_preserves_user_mod_and_backs_up_replacements() {
 
     // ---- plan ----
     let plan = compute_plan(&manifest, &scanned, &state);
-    let dl_paths: Vec<&str> = plan.downloads.iter().map(|d| d.entry.path.as_str()).collect();
+    let dl_paths: Vec<&str> = plan
+        .downloads
+        .iter()
+        .map(|d| d.entry.path.as_str())
+        .collect();
     assert!(dl_paths.contains(&"mods/create-6.0.11.jar"));
     assert!(dl_paths.contains(&"mods/newmod.jar"));
     let create_dl = plan
@@ -140,7 +147,10 @@ fn full_update_cycle_preserves_user_mod_and_backs_up_replacements() {
         .iter()
         .find(|d| d.entry.path == "mods/create-6.0.11.jar")
         .unwrap();
-    assert_eq!(create_dl.replaces.as_deref(), Some("mods/create-6.0.10.jar"));
+    assert_eq!(
+        create_dl.replaces.as_deref(),
+        Some("mods/create-6.0.10.jar")
+    );
     assert_eq!(plan.removals, vec!["mods/stale.jar".to_string()]);
     assert_eq!(plan.user_extras, vec!["mods/personal.jar".to_string()]);
     assert!(plan.collisions.is_empty());
@@ -151,13 +161,20 @@ fn full_update_cycle_preserves_user_mod_and_backs_up_replacements() {
     let report = apply(&inst, &manifest, &exec, &fetcher, "", &state, "test-ts").unwrap();
 
     // ---- filesystem assertions ----
-    assert_eq!(std::fs::read(inst.join("mods/a.jar")).unwrap(), a, "a untouched");
+    assert_eq!(
+        std::fs::read(inst.join("mods/a.jar")).unwrap(),
+        a,
+        "a untouched"
+    );
     assert_eq!(
         std::fs::read(inst.join("mods/create-6.0.11.jar")).unwrap(),
         create_new,
         "new create installed"
     );
-    assert!(!inst.join("mods/create-6.0.10.jar").exists(), "old create removed");
+    assert!(
+        !inst.join("mods/create-6.0.10.jar").exists(),
+        "old create removed"
+    );
     assert_eq!(
         std::fs::read(inst.join("mods/newmod.jar")).unwrap(),
         newmod,
@@ -236,7 +253,10 @@ fn progress_events_are_emitted_in_order() {
             mc_version: "1.21.1".into(),
             loader_version: "21.1.234".into(),
         },
-        files: vec![mod_entry("mods/a.jar", a, "a"), mod_entry("mods/b.jar", b, "b")],
+        files: vec![
+            mod_entry("mods/a.jar", a, "a"),
+            mod_entry("mods/b.jar", b, "b"),
+        ],
     };
     let state = ClientState::default(); // empty instance -> two fresh installs
     let plan = compute_plan(&manifest, &[], &state);
@@ -244,16 +264,9 @@ fn progress_events_are_emitted_in_order() {
 
     let events = std::cell::RefCell::new(Vec::<Progress>::new());
     let fetcher = FileFetcher { root: chan.clone() };
-    let report = apply_with_progress(
-        &inst,
-        &manifest,
-        &exec,
-        &fetcher,
-        "",
-        &state,
-        "ts",
-        &|p| events.borrow_mut().push(p.clone()),
-    )
+    let report = apply_with_progress(&inst, &manifest, &exec, &fetcher, "", &state, "ts", &|p| {
+        events.borrow_mut().push(p.clone())
+    })
     .unwrap();
 
     let ev = events.into_inner();
