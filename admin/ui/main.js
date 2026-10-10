@@ -6,7 +6,8 @@ const listen = window.__TAURI__?.event?.listen;
 
 const el = (id) => document.getElementById(id);
 const TEXT_FIELDS = [
-  "instance", "channel", "pack", "baseUrl", "sshHost", "remoteBase", "ignore",
+  "instance", "mcVersion", "loaderType", "loaderVersion",
+  "channel", "pack", "baseUrl", "sshHost", "remoteBase", "ignore",
   "signKey", "minClientVersion", "latestClientVersion", "clientDownloadUrl",
   "serverName", "serverAddress", "seeds",
 ];
@@ -137,6 +138,7 @@ function settings() {
 
 const PLAIN = /^[A-Za-z0-9@._~:/-]+$/; // what the server commands accept
 const VERSION = /^\d+(\.\d+){0,3}([-+][0-9A-Za-z.-]+)?$/;
+const GAME_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/; // 1.21.1, 25w14a, 21.1.234, 0.16.5
 const isHttpsUrl = (v) => /^https:\/\/[^\s/]+/i.test(v) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(v);
 
 function cmpVersion(a, b) {
@@ -153,6 +155,9 @@ function cmpVersion(a, b) {
 function validate(s) {
   const v = {};
   if (!s.instance) v.instance = ["err", "Pfad zur Instanz angeben (der Ordner mit mods/)."];
+  for (const f of ["mcVersion", "loaderVersion"]) {
+    if (s[f] && !GAME_VERSION.test(s[f])) v[f] = ["err", "Versionsnummer wie 1.21.1 bzw. 21.1.234"];
+  }
   if (!/^[A-Za-z0-9._-]+$/.test(s.channel) || s.channel === "." || s.channel === "..") {
     v.channel = ["err", "Nur Buchstaben, Ziffern, Punkt, Binde- und Unterstrich (z. B. main, beta)."];
   }
@@ -212,6 +217,7 @@ function showValidation() {
   historyBtn.disabled = busy || !!sshMissing || !!v.channel;
   el("keygenRow").classList.toggle("hidden", !!s.signKey);
   el("keygenBtn").disabled = busy;
+  el("pickInstanceBtn").disabled = busy;
   renderContext(s);
   return !blocking;
 }
@@ -235,6 +241,7 @@ function hintFor(detail) {
     [/rsync.*(not found|starten)|command not found/i, "rsync fehlt – hier oder auf dem Server installieren (z. B. apt install rsync)."],
     [/Signatur-Schlüssel .* lesen|kein gültiger Schlüssel/i, "Signatur-Schlüssel nicht gefunden oder ungültig – Pfad unter „Erweitert“ prüfen."],
     [/Instanz-Ordner nicht gefunden/i, "Instanz-Ordner prüfen – er muss den mods/-Ordner enthalten."],
+    [/nicht ermittelbar/i, "Trag Minecraft-Version, Loader und Loader-Version oben unter „Versionen“ ein – oder starte das Spiel einmal mit dieser Instanz, dann stehen sie in logs/latest.log."],
     [/existiert er schon/i, "An diesem Ort liegt schon ein Schlüssel. Trag seinen Pfad oben ein, statt einen neuen zu erzeugen – sonst passt er nicht mehr zur Spieler-App."],
     [/Ordner auf dem Server anlegen|Permission denied/i, "Keine Schreibrechte auf dem Server – gehört die Remote-Basis dem deploy-Nutzer?"],
   ];
@@ -346,7 +353,9 @@ function renderPreview(res) {
     h("span", { class: "pill" }, changeSummary(res.diff, res.files)),
     h("span", { class: "pill" },
       `${count(res.mods, "Mod", "Mods")} · ${count(res.resourcepacks, "Ressourcenpaket", "Ressourcenpakete")} · ${res.shaderpacks} Shader`),
-    h("span", { class: "pill" }, res.loader),
+    res.liveLoader
+      ? h("span", { class: "pill warn", title: res.loaderOrigin }, `${res.liveLoader} → ${res.loader}`)
+      : h("span", { class: "pill" + (res.loaderSource === "previous" ? " warn" : ""), title: res.loaderOrigin }, res.loader),
     res.liveReachable
       ? h("span", { class: "pill" }, `Live: Stand vom ${formatWhen(res.liveGeneratedAt)}`)
       : h("span", { class: "pill warn" }, "Live-Stand nicht erreichbar (Erstveröffentlichung?)"),
@@ -372,6 +381,15 @@ function renderPreview(res) {
       group("Geändert (gleicher Name, neuer Inhalt)", d.changed.map((p) => pathRow("upd", "geändert", p, labels))),
       group("Neu", d.added.map((p) => pathRow("add", "neu", p, labels))),
       group("Entfernt", d.removed.map((p) => pathRow("rem", "entfernt", p, labels))));
+  }
+  if (res.loaderSource === "previous") {
+    body.append(h("p", { class: "nomod" },
+      `⚠ Die Versionen (${res.loader}) ließen sich nicht aus der Instanz lesen und wurden vom Live-Stand übernommen. ` +
+      "Hast du Minecraft oder den Loader aktualisiert, trag die neuen Versionen oben unter „Versionen“ ein."));
+  } else if (res.liveLoader) {
+    body.append(h("p", { class: "nomod" },
+      `⚠ Loader geändert: ${res.liveLoader} → ${res.loader}, ${res.loaderOrigin}. ` +
+      "Mit dem offiziellen Launcher kann Bonegrader die neue Version für die Spieler installieren, in anderen Launchern stellen sie selbst um."));
   }
   for (const w of res.warnings) body.append(h("p", { class: "nomod" }, "⚠ " + w));
   if (res.noModId.length > 0) {
@@ -438,7 +456,9 @@ function askPublish() {
   fillIn(
     el("confirmList"),
     h("li", {}, `Änderungen: ${changeSummary(res.diff, res.files)}`),
-    h("li", {}, `Pack: ${res.pack} · ${res.loader} · ${count(res.files, "Datei", "Dateien")}`),
+    h("li", {}, `Pack: ${res.pack} · ${count(res.files, "Datei", "Dateien")}`),
+    h("li", { class: res.loaderSource === "previous" || res.liveLoader ? "warn" : null },
+      `${res.liveLoader ? `Loader: ${res.liveLoader} → ` : "Loader: "}${res.loader} – ${res.loaderOrigin}`),
     h("li", {}, `Ziel: ${res.target || `${s.sshHost}:${s.remoteBase}/${s.channel}`}`),
     h("li", { class: signing[0] === "warn" ? "warn" : null }, signing[0] === "warn" ? "⚠ unsigniert" : "✓ signiert"),
     s.minClientVersion ? h("li", {}, `Spieler-App mindestens ${s.minClientVersion}`) : null,
@@ -591,6 +611,75 @@ async function doRollback(entry) {
   }
 }
 
+// --- instance ------------------------------------------------------------------------
+
+let inspectTimer = null;
+let inspectSeq = 0;
+
+/** Show what the picked folder contains and which versions it reveals. */
+async function inspectInstance() {
+  const info = el("instanceInfo");
+  const path = el("instance").value.trim();
+  const seq = ++inspectSeq;
+  if (!invoke || !path) {
+    info.textContent = "";
+    setAutoVersions(null);
+    return;
+  }
+  let res;
+  try {
+    res = await invoke("inspect_instance", { path });
+  } catch {
+    return;
+  }
+  if (seq !== inspectSeq) return; // a newer path was typed meanwhile
+  setAutoVersions(res);
+  const manual = ["mcVersion", "loaderType", "loaderVersion"].every((f) => el(f).value.trim());
+  const sub = res.gameDir.replace(/[\\/]+$/, "") !== path.replace(/[\\/]+$/, "")
+    ? ` · liest ${res.gameDir.split(/[\\/]/).slice(-2).join("/")}` : "";
+  if (res.mods == null) {
+    info.className = "detect warn";
+    info.textContent = "⚠ Kein mods/-Ordner gefunden – ist das der Instanz-Ordner?";
+  } else if (res.loader) {
+    info.className = "detect ok";
+    info.textContent = `✓ ${count(res.mods, "Mod", "Mods")} · ${res.loader} – ${res.origin}${sub}`;
+  } else if (manual) {
+    info.className = "detect";
+    info.textContent = `${count(res.mods, "Mod", "Mods")} · Versionen von Hand eingetragen${sub}`;
+  } else {
+    info.className = "detect warn";
+    info.textContent = `${count(res.mods, "Mod", "Mods")}${sub} · Versionen nicht erkannt: unten eintragen oder das Spiel ` +
+      "einmal mit dieser Instanz starten. Sonst werden die des Live-Stands übernommen.";
+  }
+}
+
+/** Detected values as placeholders: empty fields mean "use these". */
+function setAutoVersions(res) {
+  el("mcVersion").placeholder = res?.mcVersion || "automatisch";
+  el("loaderVersion").placeholder = res?.loaderVersion || "automatisch";
+  const names = { neoforge: "NeoForge", forge: "Forge", fabric: "Fabric", quilt: "Quilt" };
+  el("loaderType").options[0].textContent = res?.loaderType ? `automatisch (${names[res.loaderType] || res.loaderType})` : "automatisch";
+}
+
+function scheduleInspect() {
+  clearTimeout(inspectTimer);
+  inspectTimer = setTimeout(inspectInstance, 400);
+}
+
+async function pickInstance() {
+  if (!invoke) return;
+  try {
+    const path = await invoke("pick_folder", { start: el("instance").value.trim() });
+    if (!path) return;
+    const field = el("instance");
+    field.value = path;
+    field.dispatchEvent(new Event("input"));
+    field.focus();
+  } catch (e) {
+    showError("Ordner-Auswahl nicht möglich", e);
+  }
+}
+
 // --- signing key ---------------------------------------------------------------------
 
 async function createKey() {
@@ -610,7 +699,8 @@ async function createKey() {
         res.keysFile
           ? `Der öffentliche Schlüssel steht jetzt in ${res.keysFile}. Committe diese Datei und veröffentliche eine neue Version der Spieler-App – erst die prüft Signaturen.`
           : "Trag den öffentlichen Schlüssel (Knopf unten) als neue Zeile in keys/manifest-signing.pub ein, committe sie und veröffentliche eine neue Version der Spieler-App – erst die prüft Signaturen.",
-        "Ab jetzt signiert veröffentlichen: Der Pfad ist oben schon eingetragen. Ältere Spieler-Apps ignorieren die Signatur einfach.",
+        "Jetzt einmal veröffentlichen (der Pfad ist oben schon eingetragen) – unbedingt bevor die neue Spieler-App erscheint: " +
+          "Sie nimmt nur noch signierte Stände an. Ältere Spieler-Apps ignorieren die Signatur einfach.",
       ],
       actions: [["Öffentlichen Schlüssel kopieren", (ev) => copyText(res.publicKey, ev.currentTarget)]],
     });
@@ -641,6 +731,9 @@ async function init() {
   sshTestBtn.addEventListener("click", sshTest);
   historyBtn.addEventListener("click", loadHistory);
   el("keygenBtn").addEventListener("click", createKey);
+  el("pickInstanceBtn").addEventListener("click", pickInstance);
+  for (const f of ["instance", "mcVersion", "loaderType", "loaderVersion"]) el(f).addEventListener("input", scheduleInspect);
+  inspectInstance();
   el("confirmNo").addEventListener("click", closeConfirm);
   el("confirmYes").addEventListener("click", doPublish);
   el("confirmDialog").addEventListener("keydown", (e) => {

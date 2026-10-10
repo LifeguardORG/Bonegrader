@@ -104,7 +104,10 @@ cargo run --release -p bonegrader-publish -- build \
 deploy/deploy.sh ./dist/main deploy@<server> /srv/bonegrader main
 ```
 
-Oder per **Admin-App** (`cargo run -p bonegrader-admin`): Vorschau gegen den
+Oder per **Admin-App** (`cargo run -p bonegrader-admin`): Instanz-Ordner wählen
+(der Ordner mit `mods/`, egal aus welchem Launcher – die App zeigt sofort, welche
+Minecraft- und Loader-Version sie erkannt hat und woher; sonst von Hand
+eintragen), Vorschau gegen den
 Live-Stand (mit Mod-Namen und Versionen), **Verbindung testen**, dann
 Veröffentlichen – mit Bestätigung und Zusammenfassung. Die App prüft, ob die
 Spieler-App den Stand annehmen würde (Signatur, Schlüssel), und sperrt das
@@ -117,7 +120,11 @@ Hosting, Deploy-Nutzer, Signatur einrichten, Beta-Channel und Rollback: siehe
 
 1. Version erhöhen – an **zwei** Stellen: `Cargo.toml` (`[workspace.package]`)
    und `web/index.html` (`VERSION`). Committen und pushen.
-2. Taggen: `git tag v1.2.1 && git push --tags`. Der Workflow
+2. Taggen: **`deploy/release.sh`** – prüft vorher alles, woran ein Release
+   scheitern kann (auf `main` und gepusht, Versionen gleich, Tag frei,
+   Signatur-Schlüssel eingetragen und Live-Stand damit signiert, Updater
+   eingerichtet), und setzt dann den Tag (`--check` prüft nur). Von Hand ginge
+   es mit `git tag v1.2.1 && git push origin v1.2.1`. Der Workflow
    [`.github/workflows/release.yml`](.github/workflows/release.yml) prüft zuerst,
    dass Tag und Versionen zusammenpassen (sonst bricht er mit einer klaren
    Meldung ab), testet, baut auf Windows/Linux/macOS (macOS als Universal-Binary)
