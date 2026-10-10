@@ -12,7 +12,7 @@
 #     TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD (with the
 #     GitHub CLI `gh`; otherwise it tells you what to paste where)
 #
-# Afterwards: commit tauri.conf.json, raise the version, tag a release. Apps
+# Afterwards: commit tauri.conf.json, then deploy/release.sh. Apps
 # from that release on update themselves when a newer release is published.
 # Running it again reuses the existing key.
 #
@@ -90,4 +90,4 @@ echo
 echo ">> done. Next:"
 echo "   1. Back up $KEY and $PWFILE (password manager, USB stick)."
 echo "   2. git add app/src-tauri/tauri.conf.json && git commit -m 'Enable self-updates'"
-echo "   3. Raise the version (Cargo.toml, web/index.html), tag and publish the release."
+echo "   3. git push, then deploy/release.sh (checks everything and tags the release)."

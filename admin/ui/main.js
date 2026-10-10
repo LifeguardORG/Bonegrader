@@ -699,7 +699,8 @@ async function createKey() {
         res.keysFile
           ? `Der öffentliche Schlüssel steht jetzt in ${res.keysFile}. Committe diese Datei und veröffentliche eine neue Version der Spieler-App – erst die prüft Signaturen.`
           : "Trag den öffentlichen Schlüssel (Knopf unten) als neue Zeile in keys/manifest-signing.pub ein, committe sie und veröffentliche eine neue Version der Spieler-App – erst die prüft Signaturen.",
-        "Ab jetzt signiert veröffentlichen: Der Pfad ist oben schon eingetragen. Ältere Spieler-Apps ignorieren die Signatur einfach.",
+        "Jetzt einmal veröffentlichen (der Pfad ist oben schon eingetragen) – unbedingt bevor die neue Spieler-App erscheint: " +
+          "Sie nimmt nur noch signierte Stände an. Ältere Spieler-Apps ignorieren die Signatur einfach.",
       ],
       actions: [["Öffentlichen Schlüssel kopieren", (ev) => copyText(res.publicKey, ev.currentTarget)]],
     });

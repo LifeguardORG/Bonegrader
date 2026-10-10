@@ -120,7 +120,11 @@ Hosting, Deploy-Nutzer, Signatur einrichten, Beta-Channel und Rollback: siehe
 
 1. Version erhöhen – an **zwei** Stellen: `Cargo.toml` (`[workspace.package]`)
    und `web/index.html` (`VERSION`). Committen und pushen.
-2. Taggen: `git tag v1.2.1 && git push --tags`. Der Workflow
+2. Taggen: **`deploy/release.sh`** – prüft vorher alles, woran ein Release
+   scheitern kann (auf `main` und gepusht, Versionen gleich, Tag frei,
+   Signatur-Schlüssel eingetragen und Live-Stand damit signiert, Updater
+   eingerichtet), und setzt dann den Tag (`--check` prüft nur). Von Hand ginge
+   es mit `git tag v1.2.1 && git push origin v1.2.1`. Der Workflow
    [`.github/workflows/release.yml`](.github/workflows/release.yml) prüft zuerst,
    dass Tag und Versionen zusammenpassen (sonst bricht er mit einer klaren
    Meldung ab), testet, baut auf Windows/Linux/macOS (macOS als Universal-Binary)
