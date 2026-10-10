@@ -186,6 +186,9 @@ label.check { display: flex; align-items: center; gap: 8px; color: var(--text); 
 .notice.warn > svg { color: var(--warn); }
 .notice-title { font-weight: 700; }
 .notice-text { margin: 0; font-size: 13px; }
+.notice-steps { margin: 4px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }
+.notice-steps code { overflow-wrap: anywhere; }
+.keygen-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
 .notice-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .notice details { grid-column: 2; margin-top: 6px; }
 .notice details > summary { cursor: pointer; color: var(--muted); font-size: 13px; }

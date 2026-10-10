@@ -37,8 +37,11 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
 const PROGRESS_EVENT: &str = "update-progress";
+/// Download progress of a Bonegrader self-update.
+const APP_UPDATE_EVENT: &str = "app-update-progress";
 /// Sent when the window should close while work is running (see `main.js`).
 const CLOSE_EVENT: &str = "close-requested";
 
@@ -47,8 +50,10 @@ const CLOSE_EVENT: &str = "close-requested";
 struct AppState {
     /// Set by `cancel_update`, read by the running update.
     cancel: Arc<AtomicBool>,
-    /// An update, undo or loader install is running.
+    /// An update, undo, loader install or self-update is running.
     busy: Arc<AtomicBool>,
+    /// This build can update itself (an updater key was configured).
+    updater: bool,
 }
 
 /// Marks the app busy until dropped.
@@ -470,15 +475,131 @@ async fn install_loader(
     .await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdate {
+    version: String,
+    current: String,
+    notes: Option<String>,
+}
+
+fn updater_error(e: tauri_plugin_updater::Error) -> Report {
+    report(anyhow::Error::new(e).context("Bonegrader-Update"))
+}
+
+/// Ask the release server for a newer Bonegrader. `None` when there is none,
+/// or when this build cannot update itself (no updater key at build time).
+#[tauri::command]
+async fn check_app_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<AppUpdate>, Report> {
+    if !state.updater {
+        return Ok(None);
+    }
+    let update = app
+        .updater()
+        .map_err(updater_error)?
+        .check()
+        .await
+        .map_err(updater_error)?;
+    Ok(update.map(|u| AppUpdate {
+        version: u.version,
+        current: u.current_version,
+        notes: u.body.filter(|b| !b.trim().is_empty()),
+    }))
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateProgress {
+    /// `download`, then `install`.
+    phase: &'static str,
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+/// Download the new version (its signature is checked against the key built
+/// into this app), install it and restart. On Windows the installer takes
+/// over and starts the new version itself.
+#[tauri::command]
+async fn install_app_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), Report> {
+    if !state.updater {
+        return Err(report(anyhow::anyhow!(
+            "Diese Version kann sich nicht selbst aktualisieren"
+        )));
+    }
+    let busy = BusyGuard::new(&state);
+    let update = app
+        .updater()
+        .map_err(updater_error)?
+        .check()
+        .await
+        .map_err(updater_error)?
+        .ok_or_else(|| report(anyhow::anyhow!("Es gibt kein neueres Bonegrader")))?;
+    let mut downloaded = 0u64;
+    update
+        .download_and_install(
+            |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = app.emit(
+                    APP_UPDATE_EVENT,
+                    AppUpdateProgress {
+                        phase: "download",
+                        downloaded,
+                        total,
+                    },
+                );
+            },
+            || {
+                let _ = app.emit(
+                    APP_UPDATE_EVENT,
+                    AppUpdateProgress {
+                        phase: "install",
+                        downloaded: 0,
+                        total: None,
+                    },
+                );
+            },
+        )
+        .await
+        .map_err(updater_error)?;
+    drop(busy);
+    app.request_restart();
+    Ok(())
+}
+
+/// The updater is only active with a public key in `plugins > updater`
+/// (see deploy/setup-updater.sh); without one, players update by hand.
+fn updater_configured<R: tauri::Runtime>(context: &tauri::Context<R>) -> bool {
+    context
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|u| u.get("pubkey"))
+        .and_then(|k| k.as_str())
+        .is_some_and(|k| !k.trim().is_empty())
+}
+
 fn is_busy(app: &AppHandle) -> bool {
     app.state::<AppState>().busy.load(Ordering::SeqCst)
 }
 
 fn main() {
-    tauri::Builder::default()
-        .manage(AppState::default())
+    let context = tauri::generate_context!();
+    let updater = updater_configured(&context);
+    let mut builder = tauri::Builder::default()
+        .manage(AppState {
+            updater,
+            ..AppState::default()
+        })
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+    if updater {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if is_busy(window.app_handle()) {
@@ -501,9 +622,11 @@ fn main() {
             pick_folder,
             create_instance,
             loader_status,
-            install_loader
+            install_loader,
+            check_app_update,
+            install_app_update
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building Bonegrader")
         .run(|app, event| {
             // Cmd+Q / quitting from the dock bypasses the window close.

@@ -53,6 +53,9 @@ let maxStep = 1; // furthest step reached so far (controls what's clickable)
 let work = null; // "apply" | "undo" | "install" while the backend must not be interrupted
 let phase = null; // progress phase of the running update
 let closeAfterWork = false; // the window was closed while working: quit when done
+let compatState = null; // the channel's hint about this Bonegrader version
+let appUpdate = null; // newer Bonegrader the updater found: {version, current, notes}
+let appProgress = null; // self-update progress: {phase, downloaded, total}
 
 const removeExtras = new Set();
 const keepCollisions = new Set();
@@ -284,7 +287,8 @@ function showError(e, { retry, changed = null } = {}) {
     actions.push(["Instanz wählen", () => goStep(2)]);
   }
   const url = (lastPlan?.compat || serverInfo?.compat)?.downloadUrl;
-  if (r.kind === "tooOld" && url) actions.push(["Zum Download", () => openUrl(url)]);
+  if (r.kind === "tooOld" && appUpdate) actions.push(["Bonegrader jetzt aktualisieren", installAppUpdate, !retry]);
+  else if (r.kind === "tooOld" && url) actions.push(["Zum Download", () => openUrl(url)]);
   showNotice({
     tone: r.kind === "cancelled" ? "info" : "err",
     title,
@@ -368,20 +372,109 @@ function renderContext() {
 }
 
 function showCompat(compat) {
+  compatState = compat;
+  renderBanner();
+}
+
+/** Where to download Bonegrader by hand: the channel's hint, else its site. */
+function downloadPage() {
+  if (compatState?.downloadUrl) return compatState.downloadUrl;
+  try {
+    return new URL(baseUrlInput.value.trim()).origin + "/";
+  } catch {
+    return null;
+  }
+}
+
+// One banner for "a newer Bonegrader exists": with the updater it installs
+// itself, otherwise the channel's hint links to the download page.
+function renderBanner() {
   banner.replaceChildren();
   banner.className = "banner hidden";
-  if (!compat || compat.state === "current") return;
-  const required = compat.state === "updateRequired";
+  const required = compatState?.state === "updateRequired";
+  if (appProgress) {
+    const p = appProgress;
+    const pct = p.total ? ` ${Math.min(100, Math.round((p.downloaded / p.total) * 100))} %` : "";
+    put(banner, h("span", { class: "banner-text" },
+      p.phase === "download" ? `Lade Bonegrader ${appUpdate?.version ?? ""} …${pct}` : "Installiere – Bonegrader startet gleich neu …"));
+    banner.className = "banner info";
+    return;
+  }
+  if (appUpdate) {
+    put(
+      banner,
+      h("span", { class: "banner-text" },
+        required
+          ? `Diese Bonegrader-Version ist zu alt für den Server – Bonegrader ${appUpdate.version} behebt das.`
+          : `Bonegrader ${appUpdate.version} ist verfügbar.`),
+      h("button", { type: "button", class: "small", onclick: installAppUpdate }, "Jetzt aktualisieren"),
+      appUpdate.notes
+        ? h("details", { class: "banner-notes" }, h("summary", {}, "Was ist neu?"), h("p", {}, appUpdate.notes))
+        : null
+    );
+    banner.className = "banner " + (required ? "err" : "info");
+    return;
+  }
+  if (!compatState || compatState.state === "current") return;
   put(
     banner,
-    required
-      ? `Diese Bonegrader-Version ist zu alt für den Server – bitte auf ${compat.min} oder neuer aktualisieren.`
-      : `Bonegrader ${compat.latest} ist verfügbar.`,
-    compat.downloadUrl
-      ? h("button", { type: "button", class: "link", onclick: () => openUrl(compat.downloadUrl) }, "Zum Download")
+    h("span", { class: "banner-text" },
+      required
+        ? `Diese Bonegrader-Version ist zu alt für den Server – bitte auf ${compatState.min} oder neuer aktualisieren.`
+        : `Bonegrader ${compatState.latest} ist verfügbar.`),
+    compatState.downloadUrl
+      ? h("button", { type: "button", class: "link", onclick: () => openUrl(compatState.downloadUrl) }, "Zum Download")
       : null
   );
   banner.className = "banner " + (required ? "err" : "info");
+}
+
+// --- Bonegrader updating itself -----------------------------------------------------
+
+/** Quietly ask whether a newer Bonegrader exists (errors just mean "not now"). */
+async function checkAppUpdate() {
+  try {
+    appUpdate = await invoke("check_app_update");
+  } catch {
+    appUpdate = null;
+  }
+  renderBanner();
+}
+
+async function installAppUpdate() {
+  if (work || busy) {
+    setStatus("Erst das laufende Update abwarten, dann Bonegrader aktualisieren.", "busy");
+    return;
+  }
+  clearNotice();
+  work = "appupdate";
+  busy = true;
+  appProgress = { phase: "download", downloaded: 0, total: null };
+  refreshButtons();
+  renderStepper();
+  renderBanner();
+  try {
+    // macOS/Linux restart right after this; on Windows the installer takes over.
+    await invoke("install_app_update");
+    appProgress = { phase: "install", downloaded: 0, total: null };
+    renderBanner();
+  } catch (e) {
+    work = null;
+    busy = false;
+    appProgress = null;
+    refreshButtons();
+    renderStepper();
+    renderBanner();
+    const page = downloadPage();
+    showNotice({
+      tone: "err",
+      title: "Das Bonegrader-Update hat nicht geklappt",
+      text: "Versuch es noch einmal – oder lade die neue Version von der Download-Seite und installiere sie darüber.",
+      detail: asReport(e).detail,
+      actions: [["Erneut versuchen", installAppUpdate, true], page ? ["Zur Download-Seite", () => openUrl(page)] : null].filter(Boolean),
+    });
+    afterWork();
+  }
 }
 
 // --- step 1: server ----------------------------------------------------------------
@@ -1162,7 +1255,9 @@ function onCloseRequested() {
     closeAfterWork = true;
     el("closeTitle").textContent = "Gleich fertig";
     el("closeText").textContent =
-      "Bonegrader schreibt gerade Änderungen in deine Instanz. Das Fenster schließt sich danach von selbst.";
+      work === "appupdate"
+        ? "Bonegrader installiert gerade seine neue Version und startet danach neu."
+        : "Bonegrader schreibt gerade Änderungen in deine Instanz. Das Fenster schließt sich danach von selbst.";
     go.classList.add("hidden");
   }
   stay.textContent = downloading ? "Weiterlaufen lassen" : "Doch nicht schließen";
@@ -1238,7 +1333,13 @@ async function init() {
   if (listen) {
     await listen("update-progress", (e) => updateProgress(e.payload));
     await listen("close-requested", onCloseRequested);
+    await listen("app-update-progress", (e) => {
+      if (work !== "appupdate") return;
+      appProgress = e.payload;
+      renderBanner();
+    });
   }
+  checkAppUpdate(); // in the background; shows a banner if there is one
   const detecting = invoke("detect_instances")
     .then((list) => (instances = list))
     .catch((e) => showError(e));

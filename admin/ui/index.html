@@ -77,6 +77,10 @@
             <label for="signKey">Signatur-Schlüssel (Pfad; leer = nicht signieren)</label>
             <input id="signKey" type="text" spellcheck="false" placeholder="~/.config/bonegrader/manifest-signing.key" />
             <p class="field-msg" id="msg-signKey"></p>
+            <div id="keygenRow" class="keygen-row">
+              <button id="keygenBtn" class="ghost small" type="button">Neuen Schlüssel erzeugen</button>
+              <span class="muted small">Noch keinen Schlüssel? Er wird unter ~/.config/bonegrader/ angelegt und nur auf diesem Rechner gespeichert.</span>
+            </div>
           </div>
           <div class="field">
             <label for="minClientVersion">Mindest-Version der Spieler-App (ältere werden blockiert)</label>

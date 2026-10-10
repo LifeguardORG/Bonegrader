@@ -5,7 +5,7 @@
 //! the SSH connection, and roll a channel back. Thin GUI over the
 //! `bonegrader_publish` library (same logic as the CLI and deploy scripts).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bonegrader_client::errors::{Kind, Report};
 use bonegrader_client::http::HttpFetcher;
@@ -16,8 +16,8 @@ use bonegrader_publish::remote::{
     list_history, rollback, test_connection, upload_channel, Connection, HistoryEntry, Remote,
 };
 use bonegrader_publish::{
-    build_manifest, category_counts, diff_manifests, gc_store, load_signing_key, populate_store,
-    sign_manifest, write_manifest, BuildOptions, Built, ManifestDiff,
+    build_manifest, category_counts, diff_manifests, gc_store, keygen, load_signing_key,
+    populate_store, sign_manifest, write_manifest, BuildOptions, Built, ManifestDiff,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -342,6 +342,50 @@ async fn rollback_to(settings: Settings, name: String) -> Result<String, Report>
     blocking(move || rollback(&settings.remote()?, settings.channel.trim(), &name)).await
 }
 
+/// Where a new signing key goes unless the admin chose a path.
+const DEFAULT_KEY_PATH: &str = "~/.config/bonegrader/manifest-signing.key";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyCreated {
+    /// The secret key (to back up, never to share).
+    secret_path: String,
+    /// The public key line for `keys/manifest-signing.pub`.
+    public_key: String,
+    /// The repository's key file it was added to, when the app runs from a
+    /// checkout (`cargo run`); otherwise the admin adds the line by hand.
+    keys_file: Option<String>,
+}
+
+/// `keys/manifest-signing.pub` of the checkout this app was built from, if it
+/// is still there.
+fn repo_keys_file() -> Option<PathBuf> {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../keys/manifest-signing.pub");
+    p.is_file().then(|| p.canonicalize().unwrap_or(p))
+}
+
+/// Create a signing key (never overwriting one) and register its public key
+/// in the checkout's `keys/manifest-signing.pub` when available.
+#[tauri::command]
+async fn create_signing_key(path: String) -> Result<KeyCreated, Report> {
+    blocking(move || {
+        let path = if path.trim().is_empty() {
+            DEFAULT_KEY_PATH.to_string()
+        } else {
+            path
+        };
+        let secret = expand_home(&path);
+        let keys_file = repo_keys_file();
+        let public = keygen(&secret, keys_file.as_deref())?;
+        Ok(KeyCreated {
+            secret_path: secret.display().to_string(),
+            public_key: public.to_hex(),
+            keys_file: keys_file.map(|p| p.display().to_string()),
+        })
+    })
+    .await
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -349,7 +393,8 @@ fn main() {
             publish,
             ssh_test,
             history,
-            rollback_to
+            rollback_to,
+            create_signing_key
         ])
         .run(tauri::generate_context!())
         .expect("error while running Bonegrader Admin");
