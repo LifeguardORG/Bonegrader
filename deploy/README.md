@@ -49,25 +49,37 @@ The admin app (`admin/`) offers the same options in a form.
 ## 2. A deploy user (instead of root)
 
 Deploys only need write access to `/srv/bonegrader`. Use a dedicated user with
-key-only login rather than `root`:
+key-only login rather than `root`. [`setup-server.sh`](./setup-server.sh) does
+it in one go (run it again any time; it keeps what exists):
 
 ```bash
-# on the server, once
-adduser --disabled-password --gecos "" deploy
-install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
-cat your_key.pub >> /home/deploy/.ssh/authorized_keys   # the admin's public SSH key
-chown deploy:deploy /home/deploy/.ssh/authorized_keys && chmod 600 /home/deploy/.ssh/authorized_keys
-install -d -o deploy -g deploy /srv/bonegrader
+# from the admin's machine (no SSH key yet? ssh-keygen -t ed25519)
+scp deploy/setup-server.sh ~/.ssh/id_ed25519.pub root@<server>:/tmp/
+ssh root@<server> 'bash /tmp/setup-server.sh --key-file /tmp/id_ed25519.pub'
 ```
 
-Then, in `/etc/ssh/sshd_config`: `PasswordAuthentication no` and
-`PermitRootLogin prohibit-password` (or `no`), and `systemctl reload ssh`.
-Test `ssh deploy@<server>` in a second terminal before closing the first.
+It creates the `deploy` user (no password, no sudo), allows your key, hands
+`/srv/bonegrader` to it (files from earlier root deploys included; everything
+stays readable for Caddy) and installs rsync if needed.
+
+Then switch off password logins — `--harden-ssh` writes
+`/etc/ssh/sshd_config.d/00-bonegrader-hardening.conf` (`PasswordAuthentication
+no`, `PermitRootLogin prohibit-password`), checks it with `sshd -t` and reloads
+ssh. It refuses while root has no SSH key, so you cannot lock yourself out:
+
+```bash
+ssh-copy-id root@<server>        # if root still logs in with a password
+ssh root@<server> 'bash /tmp/setup-server.sh --key-file /tmp/id_ed25519.pub --harden-ssh'
+```
+
+Test `ssh deploy@<server>` and `ssh root@<server>` in a second terminal before
+closing the first. To undo: delete that file and `systemctl reload ssh`.
 
 The admin app never prompts (it has no terminal): it needs key login, and the
 server's host key must be known — connect once with `ssh deploy@<server>` and
-confirm it. **Verbindung testen** in the app then checks login, write access
-to the remote base and rsync on both ends.
+confirm it. In the app, set **SSH-Ziel** `deploy@<server>` and **Remote-Basis**
+`/srv/bonegrader`; **Verbindung testen** then checks login, write access and
+rsync on both ends.
 
 ## 3. DNS
 
@@ -129,7 +141,9 @@ clients only accept a `manifest.json` signed by a key they were built with.
 Set it up once, **in this order**:
 
 1. Create the key on the admin's machine (the secret key never leaves it, never
-   commit it):
+   commit it) — in the admin app under **Erweitert → Neuen Schlüssel
+   erzeugen** (run from the checkout, it also adds the public key to
+   `keys/manifest-signing.pub`), or on the command line:
 
    ```bash
    cargo run -p bonegrader-publish -- keygen \
@@ -137,9 +151,13 @@ Set it up once, **in this order**:
      --public-out keys/manifest-signing.pub
    ```
 
+   Back up the secret key file (password manager, USB stick).
+
 2. Publish **signed** (`--sign-key …` or the field in the admin app) and deploy.
    Clients without a key ignore the `.sig`, so nothing changes for them yet.
-3. Commit `keys/manifest-signing.pub`, tag a release, hand out the new client.
+3. Commit `keys/manifest-signing.pub`, raise the version, tag a release, hand
+   out the new client (the key is compiled in: clients built before it don't
+   check).
    From then on these clients refuse unsigned or tampered manifests (with
    `--min-client-version` you can make the old, non-verifying clients update).
 
