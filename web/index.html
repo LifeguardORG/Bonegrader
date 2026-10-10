@@ -102,6 +102,10 @@
       .step .n { width: 28px; height: 28px; border-radius: 8px; background: rgba(230, 189, 114, 0.14); color: var(--accent); font-weight: 800; display: flex; align-items: center; justify-content: center; font-size: 14px; margin-bottom: 12px; }
       .step h4 { margin: 0 0 6px; font-size: 16px; }
       .step p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+      .firststart { padding: 40px 0 10px; }
+      .firststart .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+      @media (max-width: 760px) { .firststart .grid2 { grid-template-columns: 1fr; } }
+      .firststart b { color: var(--text, inherit); }
 
       footer { border-top: 1px solid rgba(255, 255, 255, 0.05); margin-top: 60px; padding: 26px 0 44px; color: var(--muted); font-size: 13px; text-align: center; }
       footer code { color: var(--text); background: var(--card); padding: 2px 7px; border-radius: 6px; }
@@ -142,6 +146,15 @@
         </div>
       </section>
 
+      <section id="firststart" class="steps firststart">
+        <h2 class="section-title">Warnung beim ersten Start?</h2>
+        <div class="grid2">
+          <div class="step"><h4>Windows</h4><p>Erscheint „Der Computer wurde durch Windows geschützt“: auf <b>Weitere Informationen</b> und dann <b>Trotzdem ausführen</b> klicken. Bonegrader ist (noch) nicht mit einem gekauften Zertifikat signiert.</p></div>
+          <div class="step"><h4>macOS</h4><p>Lässt sich Bonegrader nicht öffnen: <b>Systemeinstellungen → Datenschutz &amp; Sicherheit</b> öffnen, unten bei Bonegrader auf <b>Dennoch öffnen</b> klicken und bestätigen.</p></div>
+        </div>
+        <p class="hero-note" style="text-align:center;margin-top:14px">Das ist nur bei der ersten Installation nötig.</p>
+      </section>
+
       <footer>
         Bonegrader <span id="ver"></span> · Channel <code>bonegrader.rescue-compete.de/main</code><br />
         von RedstoneRichter für den BonesAndBees-Server
@@ -150,7 +163,7 @@
 
     <script>
       // ---- Version shown on the page (bump per release) ----
-      const VERSION = "1.1.0";
+      const VERSION = "1.2.1";
 
       // OS icons (inline SVG, currentColor).
       const ICONS = {

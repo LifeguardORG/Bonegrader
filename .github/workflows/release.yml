@@ -1,7 +1,8 @@
 name: release
 
 # Build native installers for every OS and attach them to a GitHub Release.
-# Trigger by pushing a version tag, e.g.:  git tag v0.1.0 && git push --tags
+# Raise the version in Cargo.toml and web/index.html first, then push a tag:
+#   git tag v1.2.1 && git push --tags
 on:
   push:
     tags: ["v*"]
@@ -11,7 +12,45 @@ permissions:
   contents: write
 
 jobs:
+  # Catch release mistakes before an hour of builds: a tag that does not match
+  # the version compiled into the app, or a missing updater key.
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version and keys
+        env:
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          web=$(sed -n 's/.*const VERSION = "\(.*\)";.*/\1/p' web/index.html)
+          echo "Cargo.toml: $have, web/index.html: $web"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            want="${GITHUB_REF_NAME#v}"
+            if [ "$want" != "$have" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME passt nicht zu version = \"$have\" in Cargo.toml. Erst die Version erhöhen (Cargo.toml und web/index.html), committen, dann taggen."
+              exit 1
+            fi
+            if [ "$want" != "$web" ]; then
+              echo "::error::web/index.html zeigt VERSION = \"$web\" statt \"$want\"."
+              exit 1
+            fi
+          fi
+          if ! grep -qvE '^[[:space:]]*(#|$)' keys/manifest-signing.pub; then
+            echo "::warning::keys/manifest-signing.pub enthält keinen Schlüssel – diese Version prüft keine Manifest-Signaturen."
+          fi
+          if grep -q '"createUpdaterArtifacts": true' app/src-tauri/tauri.conf.json; then
+            if [ "$HAS_UPDATER_KEY" != "true" ]; then
+              echo "::error::Der Updater ist eingerichtet, aber das GitHub-Secret TAURI_SIGNING_PRIVATE_KEY fehlt (siehe deploy/setup-updater.sh)."
+              exit 1
+            fi
+          else
+            echo "::warning::Automatische Updates sind nicht eingerichtet (deploy/setup-updater.sh) – Spieler müssen neue Versionen selbst laden."
+          fi
+
   build:
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -55,16 +94,55 @@ jobs:
       - name: Tests (non-GUI crates)
         run: cargo test -p bonegrader-core -p bonegrader-client -p bonegrader-publish -p bonegrader-cli
 
+      # macOS: with an Apple Developer ID in the secrets the app is signed and
+      # notarized; without, it stays ad-hoc signed (tauri.macos.conf.json).
+      # Only set what is present: empty variables would make the build fail.
+      - name: macOS signing (if configured)
+        if: matrix.platform == 'macos-latest'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          ID: ${{ secrets.APPLE_ID }}
+          PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$CERT" ]; then
+            echo "No Apple certificate in the secrets: ad-hoc signature (see docs/code-signing.md)."
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE=$CERT"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+          } >> "$GITHUB_ENV"
+          if [ -n "$ID" ]; then
+            {
+              echo "APPLE_ID=$ID"
+              echo "APPLE_PASSWORD=$PASSWORD"
+              echo "APPLE_TEAM_ID=$TEAM"
+            } >> "$GITHUB_ENV"
+          else
+            echo "::warning::Signed, but not notarized (APPLE_ID missing)."
+          fi
+
       # Static frontend (plain HTML/JS) — no npm build step needed.
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update packages; tauri-action then attaches latest.json,
+          # which installed apps poll for new versions.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: app
           args: ${{ matrix.args }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}-dev', github.run_number) }}
           releaseName: "Bonegrader ${{ github.ref_name }}"
-          releaseBody: "Bonegrader-Client — Installer unten. Windows: `.msi`/`.exe`, Linux: `.AppImage`/`.deb`, macOS: `.dmg`."
+          releaseBody: "Bonegrader-Client — Installer unten. Windows: `.exe`/`.msi`, Linux: `.AppImage`/`.deb`, macOS: `.dmg`. Installierte Versionen aktualisieren sich selbst, sobald dieses Release veröffentlicht ist."
           releaseDraft: true
           prerelease: false
+          includeUpdaterJson: true
+          # The download page offers the .exe first: update it the same way.
+          updaterJsonPreferNsis: true

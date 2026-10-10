@@ -312,7 +312,19 @@ details > summary:hover { color: var(--text); }
 .status.busy { color: var(--warn); }
 .status.err { color: var(--danger); }
 
-.banner { border-radius: 8px; padding: 9px 12px; margin: 0 0 10px; font-size: 13px; flex: none; }
+.banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  border-radius: 8px;
+  padding: 9px 12px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  flex: none;
+}
+.banner-notes { flex-basis: 100%; }
+.banner-notes p { margin: 6px 0 0; white-space: pre-wrap; color: var(--muted); }
 .banner.info { background: var(--accent-soft); border: 1px solid var(--accent-line); }
 .banner.err { background: var(--danger-soft); border: 1px solid var(--danger); }
 .banner .link { margin-left: 4px; }

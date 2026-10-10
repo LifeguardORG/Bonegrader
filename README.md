@@ -40,11 +40,16 @@ kein Dateien-Verschieben mehr.
   „Minecraft läuft noch“ …), mit „Erneut versuchen“ und kopierbaren Details.
   Die App folgt dem hellen bzw. dunklen Design des Systems.
 
-**Warnung beim ersten Start?** Die Installer sind (noch) nicht code-signiert:
+**Warnung beim ersten Start?** Die Installer sind (noch) nicht mit einem
+gekauften Zertifikat signiert (Details: [`docs/code-signing.md`](docs/code-signing.md)):
 
 - *Windows (SmartScreen):* „Weitere Informationen“ → „Trotzdem ausführen“.
-- *macOS:* Rechtsklick auf die App → „Öffnen“ → „Öffnen“; falls macOS meldet,
-  die App sei beschädigt: `xattr -dr com.apple.quarantine /Applications/Bonegrader.app`.
+- *macOS:* Systemeinstellungen → Datenschutz & Sicherheit → „Dennoch öffnen“.
+  Bei Versionen bis 1.2.0, die macOS „beschädigt“ nennt:
+  `xattr -dr com.apple.quarantine /Applications/Bonegrader.app`.
+
+Neue Bonegrader-Versionen meldet die App selbst („Jetzt aktualisieren“) und
+installiert sie auf Knopfdruck – geprüft mit dem Updater-Schlüssel des Projekts.
 
 ## Wie es funktioniert
 
@@ -110,15 +115,30 @@ Hosting, Deploy-Nutzer, Signatur einrichten, Beta-Channel und Rollback: siehe
 
 ## Release bauen (Installer für alle OS)
 
-```bash
-git tag v1.2.0 && git push --tags     # -> GitHub Actions testet, baut & veröffentlicht die Installer
-```
+1. Version erhöhen – an **zwei** Stellen: `Cargo.toml` (`[workspace.package]`)
+   und `web/index.html` (`VERSION`). Committen und pushen.
+2. Taggen: `git tag v1.2.1 && git push --tags`. Der Workflow
+   [`.github/workflows/release.yml`](.github/workflows/release.yml) prüft zuerst,
+   dass Tag und Versionen zusammenpassen (sonst bricht er mit einer klaren
+   Meldung ab), testet, baut auf Windows/Linux/macOS (macOS als Universal-Binary)
+   und hängt die Pakete samt `latest.json` an ein **Entwurfs-Release**.
+3. Den Entwurf auf GitHub prüfen und **veröffentlichen**. Erst dann sehen
+   installierte Apps das Update. Anschließend `deploy/publish-installers.sh`
+   für die Download-Seite; in der Admin-App „Aktuelle Version der Spieler-App“
+   setzen (Hinweis für Installationen ohne Selbst-Update).
 
-Die Version steht nur in `Cargo.toml` (`[workspace.package]`). Der Workflow
-[`.github/workflows/release.yml`](.github/workflows/release.yml) baut auf
-Windows/Linux/macOS-Runnern (macOS als Universal-Binary) und hängt die Pakete an
-ein (Draft-)Release. Lokal (nur das eigene OS): `cargo tauri build`. Danach mit
-`--latest-client-version` veröffentlichen, damit die Spieler den Hinweis sehen.
+**Automatische Updates einrichten (einmalig):** `deploy/setup-updater.sh`
+erzeugt den Updater-Schlüssel (`~/.tauri/bonegrader-updater.key` + Passwortdatei –
+**sichern!**), trägt den öffentlichen Schlüssel in
+`app/src-tauri/tauri.conf.json` ein und legt die GitHub-Secrets
+`TAURI_SIGNING_PRIVATE_KEY`/`…_PASSWORD` an (mit `gh`, sonst zeigt es, was wohin
+gehört). Danach `tauri.conf.json` committen; ab dem nächsten Release aktualisieren
+sich installierte Apps selbst. Ohne den Schlüssel kann keine neue Version mehr
+an bestehende Installationen ausgeliefert werden – Spieler müssten dann neu
+installieren.
+
+Code-Signing der Installer: [`docs/code-signing.md`](docs/code-signing.md).
+Lokal bauen (nur das eigene OS): `cargo tauri build`.
 
 ## Projektstruktur
 
@@ -132,6 +152,7 @@ crates/cli       # headless Updater (plan/update/undo)
 app/             # Tauri-v2-Desktop-App (src-tauri + statisches ui/)
 admin/           # Tauri-v2-Admin-App zum Veröffentlichen
 keys/            # öffentliche Signaturschlüssel, die der Client akzeptiert
-deploy/          # Hosting: Caddy-Block, Deploy-/Rollback-Skripte
+deploy/          # Hosting: Caddy-Block, Server-/Updater-Einrichtung, Deploy-/Rollback-Skripte
+docs/            # Code-Signing der Installer
 web/             # Download-Seite
 ```
