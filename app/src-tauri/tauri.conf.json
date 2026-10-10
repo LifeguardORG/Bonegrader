@@ -24,7 +24,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "publisher": "BonesAndBees",
     "category": "Utility",
     "shortDescription": "Mod-Updater für den BonesAndBees-Server",
@@ -39,7 +39,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDA2NThBRjM0MzNDQkY5QzAKUldUQStjc3pOSzlZQnJQNnFtQjlhM3Q0aXBlTXFPdDVObUZ1RDBYRGZTekdvZkRhWVVmVEUwaXEK",
       "endpoints": [
         "https://github.com/LifeguardORG/Bonegrader/releases/latest/download/latest.json"
       ],
