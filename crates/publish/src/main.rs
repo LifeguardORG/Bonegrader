@@ -33,7 +33,8 @@ enum Cmd {
 
 #[derive(Args)]
 struct BuildArgs {
-    /// Path to the source Minecraft instance (dev copy).
+    /// The admin's Minecraft instance: the folder holding mods/ (any
+    /// launcher), or a Prism/MultiMC instance folder.
     #[arg(long)]
     instance: PathBuf,
     /// Output channel directory (holds manifest.json + files/by-hash/).
@@ -43,14 +44,17 @@ struct BuildArgs {
     pack: String,
     #[arg(long, default_value = "main")]
     channel: String,
-    /// Minecraft version (auto-detected from minecraftinstance.json if omitted).
+    /// Minecraft version. If omitted: detected from the instance
+    /// (CurseForge, Prism/MultiMC, or the game's logs/latest.log), else taken
+    /// from the manifest in --out.
     #[arg(long)]
     mc_version: Option<String>,
-    /// Loader version (auto-detected from minecraftinstance.json if omitted).
+    /// Loader version (detected like --mc-version if omitted).
     #[arg(long)]
     loader_version: Option<String>,
-    #[arg(long, default_value = "neoforge")]
-    loader_type: String,
+    /// Loader: neoforge, forge, fabric or quilt (detected if omitted).
+    #[arg(long)]
+    loader_type: Option<String>,
     /// Optional absolute base URL to prefix `files/by-hash/...` in the manifest.
     #[arg(long, default_value = "")]
     base_url: String,
@@ -144,6 +148,7 @@ fn build(args: BuildArgs) -> Result<()> {
         address,
     });
     let signing_key = args.sign_key.as_deref().map(load_signing_key).transpose()?;
+    let previous = load_previous(&args.out);
     let opts = BuildOptions {
         pack: args.pack,
         channel: args.channel,
@@ -151,6 +156,7 @@ fn build(args: BuildArgs) -> Result<()> {
         mc_version: args.mc_version,
         loader_version: args.loader_version,
         loader_type: args.loader_type,
+        previous_loader: previous.as_ref().map(|m| m.loader.clone()),
         ignore: args.ignore,
         client: Some(client),
         server,
@@ -165,10 +171,7 @@ fn build(args: BuildArgs) -> Result<()> {
         eprintln!("  warning: {w}");
     }
 
-    print_diff(&diff_manifests(
-        load_previous(&args.out).as_ref(),
-        &built.manifest,
-    ));
+    print_diff(&diff_manifests(previous.as_ref(), &built.manifest));
 
     let (mods, rp, sh) = category_counts(&built.manifest);
     let ign = if built.ignored > 0 {
@@ -182,10 +185,11 @@ fn build(args: BuildArgs) -> Result<()> {
         built.manifest.seeds.len()
     );
     println!(
-        "Loader:   {} {} (MC {})",
+        "Loader:   {} {} (MC {}) — {}",
         built.manifest.loader.loader_type,
         built.manifest.loader.loader_version,
-        built.manifest.loader.mc_version
+        built.manifest.loader.mc_version,
+        built.loader_source.describe()
     );
     if signing_key.is_none() {
         println!("Signature: none (pass --sign-key to sign)");
@@ -196,7 +200,7 @@ fn build(args: BuildArgs) -> Result<()> {
         return Ok(());
     }
 
-    let copied = populate_store(&args.instance, &args.out, &built.manifest)?;
+    let copied = populate_store(&built.game_dir, &args.out, &built.manifest)?;
     let bytes = write_manifest(&args.out, &built.manifest)?;
     if let Some(key) = &signing_key {
         sign_manifest(&args.out, &bytes, key)?;

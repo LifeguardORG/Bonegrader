@@ -104,7 +104,10 @@ cargo run --release -p bonegrader-publish -- build \
 deploy/deploy.sh ./dist/main deploy@<server> /srv/bonegrader main
 ```
 
-Oder per **Admin-App** (`cargo run -p bonegrader-admin`): Vorschau gegen den
+Oder per **Admin-App** (`cargo run -p bonegrader-admin`): Instanz-Ordner wählen
+(der Ordner mit `mods/`, egal aus welchem Launcher – die App zeigt sofort, welche
+Minecraft- und Loader-Version sie erkannt hat und woher; sonst von Hand
+eintragen), Vorschau gegen den
 Live-Stand (mit Mod-Namen und Versionen), **Verbindung testen**, dann
 Veröffentlichen – mit Bestätigung und Zusammenfassung. Die App prüft, ob die
 Spieler-App den Stand annehmen würde (Signatur, Schlüssel), und sperrt das

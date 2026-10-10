@@ -21,7 +21,7 @@ Below assumes a dockerized Caddy on the host (Caddy + PHP + MariaDB + PMA in
 
 ```bash
 cargo run --release -p bonegrader-publish -- build \
-  --instance ~/curseforge/minecraft/Instances/BonesAndBees \
+  --instance ~/path/to/BonesAndBees \
   --out ./dist/main --channel main \
   --sign-key ~/.config/bonegrader/manifest-signing.key   # see 7.
 # review the printed diff before shipping; add --gc to prune local orphan blobs
@@ -29,6 +29,14 @@ cargo run --release -p bonegrader-publish -- build \
 
 This writes `./dist/main/manifest.json` (+ `.sig`) and `./dist/main/files/by-hash/*`.
 Manifest URLs are **relative**, so the same build works under any domain.
+
+`--instance` is the folder holding `mods/` — from any launcher (a Prism/MultiMC
+instance folder works too). The Minecraft and loader versions are read from the
+launcher's metadata (CurseForge `minecraftinstance.json`, Prism/MultiMC
+`mmc-pack.json`), else from the game's last start (`logs/latest.log`, written by
+every launcher), else taken from the manifest already in `--out`. The build
+prints where they came from; override with `--mc-version`, `--loader-type`,
+`--loader-version` (the admin app: "Versionen").
 
 The build refuses packs that would break every client — e.g. two jars that
 declare the same modId (the game would not start) — and warns about identical

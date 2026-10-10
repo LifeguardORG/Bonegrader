@@ -24,10 +24,39 @@
         <h2 id="h-source">Quelle &amp; Channel</h2>
         <div class="grid">
           <div class="field full">
-            <label for="instance">Instanz-Ordner (Quelle des Packs)</label>
-            <input id="instance" type="text" spellcheck="false" placeholder="/pfad/zur/curseforge/instanz" />
+            <label for="instance">Instanz-Ordner (Quelle des Packs – der Ordner mit mods/, egal aus welchem Launcher)</label>
+            <div class="input-row">
+              <input id="instance" type="text" spellcheck="false" placeholder="/pfad/zur/instanz" aria-describedby="instanceInfo" />
+              <button id="pickInstanceBtn" class="ghost" type="button">Durchsuchen …</button>
+            </div>
             <p class="field-msg" id="msg-instance"></p>
+            <p class="detect" id="instanceInfo" role="status"></p>
           </div>
+          <fieldset class="field full versions">
+            <legend>Versionen – leer lassen = automatisch aus der Instanz</legend>
+            <div class="trio">
+              <div class="field">
+                <label for="mcVersion">Minecraft</label>
+                <input id="mcVersion" type="text" spellcheck="false" placeholder="automatisch" />
+                <p class="field-msg" id="msg-mcVersion"></p>
+              </div>
+              <div class="field">
+                <label for="loaderType">Loader</label>
+                <select id="loaderType">
+                  <option value="">automatisch</option>
+                  <option value="neoforge">NeoForge</option>
+                  <option value="forge">Forge</option>
+                  <option value="fabric">Fabric</option>
+                  <option value="quilt">Quilt</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="loaderVersion">Loader-Version</label>
+                <input id="loaderVersion" type="text" spellcheck="false" placeholder="automatisch" />
+                <p class="field-msg" id="msg-loaderVersion"></p>
+              </div>
+            </div>
+          </fieldset>
           <div class="field">
             <label for="channel">Channel</label>
             <input id="channel" type="text" spellcheck="false" placeholder="main" />

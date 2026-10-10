@@ -13,6 +13,7 @@
 //! warns before updating an instance that doesn't look like the pack.
 
 use bonegrader_core::launcher::parse_curseforge_instance as parse_cf;
+pub use bonegrader_core::launcher::{parse_prism_instance, PrismInstance};
 use std::path::{Path, PathBuf};
 
 /// Which launcher an instance belongs to.
@@ -53,55 +54,6 @@ pub fn parse_curseforge_instance(dir: &Path, json: &str) -> Option<DetectedInsta
         loader_version: cf.loader_version,
         profile_key: None,
     })
-}
-
-/// Name, Minecraft version and loader of a Prism Launcher instance, from its
-/// `instance.cfg` (INI) and `mmc-pack.json` (component list).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrismInstance {
-    pub name: String,
-    pub mc_version: Option<String>,
-    pub loader_type: Option<String>,
-    pub loader_version: Option<String>,
-}
-
-pub fn parse_prism_instance(instance_cfg: &str, mmc_pack: Option<&str>) -> Option<PrismInstance> {
-    let name = instance_cfg
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("name="))
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())?;
-    let mut inst = PrismInstance {
-        name,
-        mc_version: None,
-        loader_type: None,
-        loader_version: None,
-    };
-    let pack: serde_json::Value = mmc_pack
-        .and_then(|j| serde_json::from_str(j).ok())
-        .unwrap_or_default();
-    for c in pack
-        .get("components")
-        .and_then(|c| c.as_array())
-        .into_iter()
-        .flatten()
-    {
-        let version = c.get("version").and_then(|v| v.as_str()).map(String::from);
-        let loader = match c.get("uid").and_then(|u| u.as_str()).unwrap_or("") {
-            "net.minecraft" => {
-                inst.mc_version = version;
-                continue;
-            }
-            "net.neoforged" => "neoforge",
-            "net.minecraftforge" => "forge",
-            "net.fabricmc.fabric-loader" => "fabric",
-            "org.quiltmc.quilt-loader" => "quilt",
-            _ => continue,
-        };
-        inst.loader_type = Some(loader.to_string());
-        inst.loader_version = version;
-    }
-    Some(inst)
 }
 
 /// Scan a Prism Launcher `instances` folder.
@@ -459,28 +411,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(f.loader_type.as_deref(), Some("forge"));
-    }
-
-    #[test]
-    fn parses_prism_instances() {
-        let cfg = "[General]\nInstanceType=OneSix\nname=BonesAndBees\niconKey=default\n";
-        let pack = r#"{"components":[
-            {"uid":"org.lwjgl3","version":"3.3.3"},
-            {"uid":"net.minecraft","version":"1.21.1"},
-            {"uid":"net.neoforged","version":"21.1.234"}
-        ],"formatVersion":1}"#;
-        let p = parse_prism_instance(cfg, Some(pack)).unwrap();
-        assert_eq!(p.name, "BonesAndBees");
-        assert_eq!(p.mc_version.as_deref(), Some("1.21.1"));
-        assert_eq!(p.loader_type.as_deref(), Some("neoforge"));
-        assert_eq!(p.loader_version.as_deref(), Some("21.1.234"));
-
-        let vanilla = parse_prism_instance("name=Plain", None).unwrap();
-        assert_eq!(vanilla.loader_type, None);
-        assert!(
-            parse_prism_instance("InstanceType=OneSix", None).is_none(),
-            "needs a name"
-        );
     }
 
     #[test]

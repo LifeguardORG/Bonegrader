@@ -10,17 +10,19 @@ use std::path::{Path, PathBuf};
 use bonegrader_client::errors::{Kind, Report};
 use bonegrader_client::http::HttpFetcher;
 use bonegrader_client::session::{fetch_manifest, trusted_keys};
-use bonegrader_core::manifest::{ClientInfo, ServerInfo};
+use bonegrader_core::manifest::{ClientInfo, Loader, Manifest, ServerInfo};
 use bonegrader_core::sign::{PublicKey, SecretKey};
 use bonegrader_publish::remote::{
     list_history, rollback, test_connection, upload_channel, Connection, HistoryEntry, Remote,
 };
 use bonegrader_publish::{
-    build_manifest, category_counts, diff_manifests, gc_store, keygen, load_signing_key,
-    populate_store, sign_manifest, write_manifest, BuildOptions, Built, ManifestDiff,
+    build_manifest, category_counts, detect_loader, diff_manifests, game_dir, gc_store, keygen,
+    load_signing_key, populate_store, sign_manifest, write_manifest, BuildOptions, Built,
+    LoaderSource, ManifestDiff,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_dialog::DialogExt;
 
 const PROGRESS_EVENT: &str = "publish-progress";
 
@@ -29,6 +31,13 @@ const PROGRESS_EVENT: &str = "publish-progress";
 #[serde(rename_all = "camelCase")]
 struct Settings {
     instance: String,
+    /// Empty: detected from the instance (or taken from the live manifest).
+    #[serde(default)]
+    mc_version: String,
+    #[serde(default)]
+    loader_type: String,
+    #[serde(default)]
+    loader_version: String,
     channel: String,
     base_url: String,
     pack: String,
@@ -72,14 +81,15 @@ fn expand_home(p: &str) -> PathBuf {
 }
 
 impl Settings {
-    fn build_options(&self) -> BuildOptions {
+    fn build_options(&self, previous_loader: Option<Loader>) -> BuildOptions {
         BuildOptions {
             pack: self.pack.trim().to_string(),
             channel: self.channel.trim().to_string(),
             base_url: self.base_url.trim().to_string(),
-            mc_version: None,
-            loader_version: None,
-            loader_type: "neoforge".into(),
+            mc_version: opt(&self.mc_version),
+            loader_version: opt(&self.loader_version),
+            loader_type: opt(&self.loader_type),
+            previous_loader,
             ignore: self.ignore.clone(),
             client: Some(ClientInfo {
                 min_version: opt(&self.min_client_version),
@@ -94,8 +104,18 @@ impl Settings {
         }
     }
 
-    fn build(&self) -> anyhow::Result<Built> {
-        build_manifest(&expand_home(&self.instance), &self.build_options())
+    /// What players get now (best-effort; no signature check needed to
+    /// compare with it).
+    fn live(&self) -> Option<Manifest> {
+        fetch_manifest(&HttpFetcher::new(), self.base_url.trim(), &[])
+            .ok()
+            .map(|f| f.manifest)
+    }
+
+    /// Versions the instance does not reveal are taken from the live manifest.
+    fn build(&self, live: Option<&Manifest>) -> anyhow::Result<Built> {
+        let previous = live.map(|m| m.loader.clone());
+        build_manifest(&expand_home(&self.instance), &self.build_options(previous))
     }
 
     fn key(&self) -> anyhow::Result<Option<SecretKey>> {
@@ -161,6 +181,15 @@ impl Signing {
     }
 }
 
+fn loader_label(l: &Loader) -> String {
+    format!(
+        "{} {} (MC {})",
+        loader_name(&l.loader_type),
+        l.loader_version,
+        l.mc_version
+    )
+}
+
 fn loader_name(t: &str) -> &str {
     match t {
         "neoforge" => "NeoForge",
@@ -201,6 +230,11 @@ struct PreviewResult {
     no_mod_id: Vec<String>,
     warnings: Vec<String>,
     loader: String,
+    loader_source: LoaderSource,
+    /// Where the loader came from, in words.
+    loader_origin: String,
+    /// The live manifest's loader, if it differs.
+    live_loader: Option<String>,
     pack: String,
     channel: String,
     live_reachable: bool,
@@ -214,13 +248,10 @@ struct PreviewResult {
 #[tauri::command]
 async fn preview(settings: Settings) -> Result<PreviewResult, Report> {
     blocking(move || {
-        let built = settings.build()?;
+        let live = settings.live();
+        let built = settings.build(live.as_ref())?;
         let key = settings.key()?; // fail early on a wrong key path
         let signing = Signing::check(key.as_ref())?;
-        // Informational only: no signature check needed for the live diff.
-        let live = fetch_manifest(&HttpFetcher::new(), settings.base_url.trim(), &[])
-            .ok()
-            .map(|f| f.manifest);
         let diff = diff_manifests(live.as_ref(), &built.manifest);
         let (mods, resourcepacks, shaderpacks) = category_counts(&built.manifest);
         let l = &built.manifest.loader;
@@ -234,12 +265,13 @@ async fn preview(settings: Settings) -> Result<PreviewResult, Report> {
             ignored: built.ignored,
             no_mod_id: built.no_modid,
             warnings: built.warnings,
-            loader: format!(
-                "{} {} (MC {})",
-                loader_name(&l.loader_type),
-                l.loader_version,
-                l.mc_version
-            ),
+            loader: loader_label(l),
+            loader_source: built.loader_source,
+            loader_origin: built.loader_source.describe().to_string(),
+            live_loader: live
+                .as_ref()
+                .filter(|m| m.loader != *l)
+                .map(|m| loader_label(&m.loader)),
             pack: built.manifest.pack_name.clone(),
             channel: built.manifest.channel.clone(),
             live_reachable: live.is_some(),
@@ -289,10 +321,10 @@ async fn publish(app: AppHandle, settings: Settings) -> Result<PublishResult, Re
         }
 
         phase("build");
-        let built = settings.build()?;
+        let built = settings.build(settings.live().as_ref())?;
         let channel = built.manifest.channel.clone();
         let out = store_root.join(&channel);
-        let new_blobs = populate_store(&expand_home(&settings.instance), &out, &built.manifest)?;
+        let new_blobs = populate_store(&built.game_dir, &out, &built.manifest)?;
         let bytes = write_manifest(&out, &built.manifest)?;
         let signature = out.join(bonegrader_core::sign::SIGNATURE_FILE);
         match &key {
@@ -319,6 +351,71 @@ async fn publish(app: AppHandle, settings: Settings) -> Result<PublishResult, Re
             signed: key.is_some(),
             previous,
         })
+    })
+    .await
+}
+
+/// What the admin picked as instance, as the publisher will read it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstanceInfo {
+    /// The folder that is scanned (a Prism/MultiMC instance's game folder).
+    game_dir: String,
+    /// Jar files in `mods/`; `None` without a `mods/` folder.
+    mods: Option<usize>,
+    mc_version: Option<String>,
+    loader_type: Option<String>,
+    loader_version: Option<String>,
+    /// "NeoForge 21.1.234 (MC 1.21.1)", if detected.
+    loader: Option<String>,
+    /// Where it was found, in words.
+    origin: Option<String>,
+}
+
+/// Look at the picked folder: is it an instance, and which versions does it reveal?
+#[tauri::command]
+async fn inspect_instance(path: String) -> Result<InstanceInfo, Report> {
+    blocking(move || {
+        let picked = expand_home(&path);
+        let game = game_dir(&picked);
+        let mods = std::fs::read_dir(game.join("mods")).ok().map(|dir| {
+            dir.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "jar"))
+                .count()
+        });
+        let found = detect_loader(&picked);
+        Ok(InstanceInfo {
+            game_dir: game.display().to_string(),
+            mods,
+            loader: found.as_ref().map(|d| {
+                loader_label(&Loader {
+                    loader_type: d.loader_type.clone(),
+                    mc_version: d.mc_version.clone(),
+                    loader_version: d.loader_version.clone(),
+                })
+            }),
+            origin: found.as_ref().map(|d| d.source.describe().to_string()),
+            mc_version: found.as_ref().map(|d| d.mc_version.clone()),
+            loader_type: found.as_ref().map(|d| d.loader_type.clone()),
+            loader_version: found.map(|d| d.loader_version),
+        })
+    })
+    .await
+}
+
+/// Native folder picker, starting at `start` when that folder exists.
+#[tauri::command]
+async fn pick_folder(app: AppHandle, start: String) -> Result<Option<String>, Report> {
+    blocking(move || {
+        let mut dialog = app.dialog().file().set_title("Instanz-Ordner wählen");
+        let start = expand_home(&start);
+        if start.is_dir() {
+            dialog = dialog.set_directory(start);
+        }
+        Ok(dialog
+            .blocking_pick_folder()
+            .and_then(|f| f.into_path().ok())
+            .map(|p| p.display().to_string()))
     })
     .await
 }
@@ -388,8 +485,11 @@ async fn create_signing_key(path: String) -> Result<KeyCreated, Report> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             preview,
+            inspect_instance,
+            pick_folder,
             publish,
             ssh_test,
             history,

@@ -4,11 +4,15 @@
 //! the server (upload, history, rollback) lives in [`remote`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use bonegrader_core::hash::digest_file;
-use bonegrader_core::launcher::{loader_type_from_name, parse_curseforge_instance};
+use bonegrader_core::launcher::{
+    loader_from_game_log, loader_from_mmc_pack, loader_type_from_name, parse_curseforge_instance,
+    LoaderInfo,
+};
 use bonegrader_core::manifest::{
     Category, ClientInfo, FileEntry, Loader, Manifest, SeedEntry, ServerInfo, SCHEMA_VERSION,
 };
@@ -23,22 +27,109 @@ use time::OffsetDateTime;
 
 const CATEGORIES: [Category; 3] = [Category::Mod, Category::Resourcepack, Category::Shaderpack];
 
+/// Where the manifest's Minecraft and loader versions came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LoaderSource {
+    /// Entered by hand (`--mc-version` … / the admin's "Erweitert" fields).
+    Manual,
+    /// CurseForge's `minecraftinstance.json`.
+    CurseForge,
+    /// Prism Launcher's / MultiMC's `mmc-pack.json`.
+    Prism,
+    /// The game's last start (`logs/latest.log`) — works for every launcher.
+    GameLog,
+    /// Taken over from the manifest published before.
+    Previous,
+}
+
+impl LoaderSource {
+    pub fn describe(self) -> &'static str {
+        match self {
+            LoaderSource::Manual => "von Hand eingetragen",
+            LoaderSource::CurseForge => "aus der CurseForge-Instanz",
+            LoaderSource::Prism => "aus der Prism-/MultiMC-Instanz",
+            LoaderSource::GameLog => "aus dem letzten Spielstart (logs/latest.log)",
+            LoaderSource::Previous => "vom bisher veröffentlichten Manifest übernommen",
+        }
+    }
+}
+
+/// Loader and Minecraft version found in an instance, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedLoader {
     pub loader_type: String,
     pub mc_version: String,
     pub loader_version: String,
+    pub source: LoaderSource,
 }
 
-/// Best-effort loader detection from a CurseForge `minecraftinstance.json`.
-pub fn detect_loader(instance_dir: &Path) -> Option<DetectedLoader> {
-    let text = std::fs::read_to_string(instance_dir.join("minecraftinstance.json")).ok()?;
-    let cf = parse_curseforge_instance(&text)?;
-    Some(DetectedLoader {
-        loader_type: loader_type_from_name(cf.loader_name.as_deref().unwrap_or_default())
-            .to_string(),
-        mc_version: cf.mc_version?,
-        loader_version: cf.loader_version?,
-    })
+impl DetectedLoader {
+    fn new(info: LoaderInfo, source: LoaderSource) -> Self {
+        DetectedLoader {
+            loader_type: info.loader_type,
+            mc_version: info.mc_version,
+            loader_version: info.loader_version,
+            source,
+        }
+    }
+}
+
+/// The folder holding `mods/`, `config/` …: the instance folder itself, or —
+/// when a Prism/MultiMC instance folder was picked — its `minecraft` /
+/// `.minecraft` subfolder.
+pub fn game_dir(instance: &Path) -> PathBuf {
+    if instance.join("mods").is_dir() {
+        return instance.to_path_buf();
+    }
+    [".minecraft", "minecraft"]
+        .iter()
+        .map(|sub| instance.join(sub))
+        .find(|dir| dir.join("mods").is_dir())
+        .unwrap_or_else(|| instance.to_path_buf())
+}
+
+/// Best-effort loader detection, launcher metadata first: CurseForge's
+/// `minecraftinstance.json`, Prism/MultiMC's `mmc-pack.json` (next to the game
+/// folder), then the log of the game's last start, which every launcher
+/// leaves in `logs/latest.log`.
+pub fn detect_loader(instance: &Path) -> Option<DetectedLoader> {
+    let game = game_dir(instance);
+    let read = |p: PathBuf| std::fs::read_to_string(p).ok();
+    let curseforge = || {
+        let cf = parse_curseforge_instance(&read(game.join("minecraftinstance.json"))?)?;
+        Some(DetectedLoader {
+            loader_type: loader_type_from_name(cf.loader_name.as_deref().unwrap_or_default())
+                .to_string(),
+            mc_version: cf.mc_version?,
+            loader_version: cf.loader_version?,
+            source: LoaderSource::CurseForge,
+        })
+    };
+    let prism = || {
+        [Some(instance), game.parent()]
+            .into_iter()
+            .flatten()
+            .find_map(|dir| loader_from_mmc_pack(&read(dir.join("mmc-pack.json"))?))
+            .map(|info| DetectedLoader::new(info, LoaderSource::Prism))
+    };
+    let game_log = || {
+        loader_from_game_log(&read_log_head(&game.join("logs/latest.log"))?)
+            .map(|info| DetectedLoader::new(info, LoaderSource::GameLog))
+    };
+    curseforge().or_else(prism).or_else(game_log)
+}
+
+/// The first part of a game log: the launch details are at the top, and a
+/// long session's log can be large.
+fn read_log_head(path: &Path) -> Option<String> {
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(1 << 20)
+        .read_to_end(&mut head)
+        .ok()?;
+    Some(String::from_utf8_lossy(&head).into_owned())
 }
 
 #[derive(Default)]
@@ -46,9 +137,15 @@ pub struct BuildOptions {
     pub pack: String,
     pub channel: String,
     pub base_url: String,
+    /// Override the detected Minecraft version.
     pub mc_version: Option<String>,
+    /// Override the detected loader version.
     pub loader_version: Option<String>,
-    pub loader_type: String,
+    /// Override the detected loader (`neoforge`, `forge`, `fabric`, `quilt`).
+    pub loader_type: Option<String>,
+    /// Used for whatever is neither given nor detectable, typically the
+    /// loader of the manifest published before.
+    pub previous_loader: Option<Loader>,
     pub ignore: Vec<String>,
     /// Client version hints published with the manifest.
     pub client: Option<ClientInfo>,
@@ -61,6 +158,10 @@ pub struct BuildOptions {
 
 pub struct Built {
     pub manifest: Manifest,
+    /// The folder that was scanned (see [`game_dir`]); copy blobs from here.
+    pub game_dir: PathBuf,
+    /// Where the loader and Minecraft version came from.
+    pub loader_source: LoaderSource,
     pub local: Vec<LocalFile>,
     pub ignored: usize,
     /// Mod paths without a stable modId (they fall back to file-name identity).
@@ -80,21 +181,8 @@ pub fn build_manifest(instance: &Path, opts: &BuildOptions) -> Result<Built> {
     if !is_safe_component(&opts.channel) {
         bail!("ungültiger Channel-Name: {:?}", opts.channel);
     }
-    let detected = detect_loader(instance);
-    let mc_version = opts
-        .mc_version
-        .clone()
-        .or_else(|| detected.as_ref().map(|d| d.mc_version.clone()))
-        .context("Minecraft-Version nicht ermittelbar (bitte angeben)")?;
-    let loader_version = opts
-        .loader_version
-        .clone()
-        .or_else(|| detected.as_ref().map(|d| d.loader_version.clone()))
-        .context("Loader-Version nicht ermittelbar (bitte angeben)")?;
-    let loader_type = detected
-        .as_ref()
-        .map(|d| d.loader_type.clone())
-        .unwrap_or_else(|| opts.loader_type.clone());
+    let (loader, loader_source) = resolve_loader(instance, opts)?;
+    let instance = &game_dir(instance);
 
     let mut local = scan_instance(instance, &CATEGORIES)
         .with_context(|| format!("Instanz {} einlesen", instance.display()))?;
@@ -125,11 +213,7 @@ pub fn build_manifest(instance: &Path, opts: &BuildOptions) -> Result<Built> {
         generated_at: OffsetDateTime::now_utc()
             .format(&Rfc3339)
             .unwrap_or_default(),
-        loader: Loader {
-            loader_type,
-            mc_version,
-            loader_version,
-        },
+        loader,
         files,
         client: opts.client.clone().filter(|c| *c != ClientInfo::default()),
         server: opts.server.clone(),
@@ -140,11 +224,63 @@ pub fn build_manifest(instance: &Path, opts: &BuildOptions) -> Result<Built> {
         .context("Das Manifest würde von den Clients abgelehnt")?;
     Ok(Built {
         manifest,
+        game_dir: instance.clone(),
+        loader_source,
         local,
         ignored,
         no_modid,
         warnings,
     })
+}
+
+fn given(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|v| !v.is_empty())
+}
+
+/// Each of the three values: given > detected in the instance > previous manifest.
+fn resolve_loader(instance: &Path, opts: &BuildOptions) -> Result<(Loader, LoaderSource)> {
+    let (mc, version, kind) = (
+        given(&opts.mc_version),
+        given(&opts.loader_version),
+        given(&opts.loader_type),
+    );
+    let fallback = match (mc, version, kind) {
+        (Some(_), Some(_), Some(_)) => None,
+        _ => detect_loader(instance).or_else(|| {
+            opts.previous_loader.clone().map(|l| DetectedLoader {
+                loader_type: l.loader_type,
+                mc_version: l.mc_version,
+                loader_version: l.loader_version,
+                source: LoaderSource::Previous,
+            })
+        }),
+    };
+    let pick = |manual: Option<&str>, auto: Option<&String>| {
+        manual.map(String::from).or_else(|| auto.cloned())
+    };
+    let missing = || {
+        anyhow::anyhow!(
+            "Minecraft- und Loader-Version nicht ermittelbar: Die Instanz hat keine \
+             CurseForge- oder Prism-Daten und kein logs/latest.log. Das Spiel einmal mit \
+             dieser Instanz starten oder die Versionen von Hand angeben."
+        )
+    };
+    let loader = Loader {
+        mc_version: pick(mc, fallback.as_ref().map(|d| &d.mc_version)).ok_or_else(missing)?,
+        loader_version: pick(version, fallback.as_ref().map(|d| &d.loader_version))
+            .ok_or_else(missing)?,
+        loader_type: pick(kind, fallback.as_ref().map(|d| &d.loader_type))
+            .ok_or_else(missing)?
+            .to_lowercase(),
+    };
+    if !["neoforge", "forge", "fabric", "quilt"].contains(&loader.loader_type.as_str()) {
+        bail!(
+            "unbekannter Loader {:?} (erlaubt: neoforge, forge, fabric, quilt)",
+            loader.loader_type
+        );
+    }
+    let source = fallback.map_or(LoaderSource::Manual, |d| d.source);
+    Ok((loader, source))
 }
 
 /// Two jars declaring the same modId crash the game on start — for everyone.
@@ -612,7 +748,7 @@ mod tests {
             channel: "main".into(),
             mc_version: Some("1.21.1".into()),
             loader_version: Some("21.1.234".into()),
-            loader_type: "neoforge".into(),
+            loader_type: Some("neoforge".into()),
             ..Default::default()
         }
     }
@@ -767,6 +903,111 @@ mod tests {
         ]);
         let built = build_manifest(dup.path(), &opts()).unwrap();
         assert_eq!(built.warnings.len(), 1, "{:?}", built.warnings);
+    }
+
+    /// Options without any version: everything must come from the instance.
+    fn auto() -> BuildOptions {
+        BuildOptions {
+            pack: "P".into(),
+            channel: "main".into(),
+            ..Default::default()
+        }
+    }
+
+    fn loader_of(b: &Built) -> (&str, &str, &str, LoaderSource) {
+        let l = &b.manifest.loader;
+        (
+            l.loader_type.as_str(),
+            l.mc_version.as_str(),
+            l.loader_version.as_str(),
+            b.loader_source,
+        )
+    }
+
+    #[test]
+    fn detects_the_loader_from_any_launcher() {
+        let cf = instance(&[
+            ("mods/a.jar", jar(&["a"])),
+            (
+                "minecraftinstance.json",
+                br#"{"name":"P","gameVersion":"1.21.1",
+                    "baseModLoader":{"name":"neoforge-21.1.234","forgeVersion":"21.1.234"}}"#
+                    .to_vec(),
+            ),
+        ]);
+        let b = build_manifest(cf.path(), &auto()).unwrap();
+        assert_eq!(
+            loader_of(&b),
+            ("neoforge", "1.21.1", "21.1.234", LoaderSource::CurseForge)
+        );
+
+        // Prism/MultiMC: the instance folder (or its game folder) is picked.
+        let prism = instance(&[
+            ("instance.cfg", b"name=P\n".to_vec()),
+            (
+                "mmc-pack.json",
+                br#"{"components":[{"uid":"net.minecraft","version":"1.21.1"},
+                    {"uid":"net.neoforged","version":"21.1.230"}]}"#
+                    .to_vec(),
+            ),
+            ("minecraft/mods/a.jar", jar(&["a"])),
+        ]);
+        for picked in [prism.path().to_path_buf(), prism.path().join("minecraft")] {
+            let b = build_manifest(&picked, &auto()).unwrap();
+            assert_eq!(
+                loader_of(&b),
+                ("neoforge", "1.21.1", "21.1.230", LoaderSource::Prism)
+            );
+            assert_eq!(b.game_dir, prism.path().join("minecraft"));
+            assert_eq!(b.manifest.files[0].path, "mods/a.jar");
+        }
+
+        // Any other launcher: the game's last start.
+        let other = instance(&[
+            ("mods/a.jar", jar(&["a"])),
+            (
+                "logs/latest.log",
+                b"[main/INFO]: ModLauncher running: args [--fml.neoForgeVersion, 21.1.228, \
+                  --fml.fmlVersion, 4.0.31, --fml.mcVersion, 1.21.1]\n"
+                    .to_vec(),
+            ),
+        ]);
+        let b = build_manifest(other.path(), &auto()).unwrap();
+        assert_eq!(
+            loader_of(&b),
+            ("neoforge", "1.21.1", "21.1.228", LoaderSource::GameLog)
+        );
+
+        // Given values win, field by field.
+        let mut o = auto();
+        o.loader_version = Some("21.1.240".into());
+        let b = build_manifest(other.path(), &o).unwrap();
+        assert_eq!(
+            loader_of(&b),
+            ("neoforge", "1.21.1", "21.1.240", LoaderSource::GameLog)
+        );
+    }
+
+    #[test]
+    fn without_launcher_data_it_falls_back_or_asks() {
+        let bare = instance(&[("mods/a.jar", jar(&["a"]))]);
+        let err = build_manifest(bare.path(), &auto()).err().unwrap();
+        assert!(format!("{err:#}").contains("nicht ermittelbar"), "{err:#}");
+
+        let mut o = auto();
+        o.previous_loader = Some(man(vec![]).loader);
+        let b = build_manifest(bare.path(), &o).unwrap();
+        assert_eq!(
+            loader_of(&b),
+            ("neoforge", "1.21.1", "21.1.234", LoaderSource::Previous)
+        );
+
+        let b = build_manifest(bare.path(), &opts()).unwrap();
+        assert_eq!(b.loader_source, LoaderSource::Manual);
+
+        let mut o = opts();
+        o.loader_type = Some("rift".into());
+        assert!(build_manifest(bare.path(), &o).is_err(), "unknown loader");
     }
 
     #[test]
