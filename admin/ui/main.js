@@ -210,6 +210,8 @@ function showValidation() {
   publishBtn.disabled = busy || blocking || sshMissing || !lastPreview || lastPreview.blocked;
   sshTestBtn.disabled = busy || !!sshMissing;
   historyBtn.disabled = busy || !!sshMissing || !!v.channel;
+  el("keygenRow").classList.toggle("hidden", !!s.signKey);
+  el("keygenBtn").disabled = busy;
   renderContext(s);
   return !blocking;
 }
@@ -233,6 +235,7 @@ function hintFor(detail) {
     [/rsync.*(not found|starten)|command not found/i, "rsync fehlt – hier oder auf dem Server installieren (z. B. apt install rsync)."],
     [/Signatur-Schlüssel .* lesen|kein gültiger Schlüssel/i, "Signatur-Schlüssel nicht gefunden oder ungültig – Pfad unter „Erweitert“ prüfen."],
     [/Instanz-Ordner nicht gefunden/i, "Instanz-Ordner prüfen – er muss den mods/-Ordner enthalten."],
+    [/existiert er schon/i, "An diesem Ort liegt schon ein Schlüssel. Trag seinen Pfad oben ein, statt einen neuen zu erzeugen – sonst passt er nicht mehr zur Spieler-App."],
     [/Ordner auf dem Server anlegen|Permission denied/i, "Keine Schreibrechte auf dem Server – gehört die Remote-Basis dem deploy-Nutzer?"],
   ];
   return rules.find(([re]) => re.test(detail))?.[1] || "Details ansehen; mit „Details kopieren“ lässt sich der Fehler weitergeben.";
@@ -264,11 +267,12 @@ async function copyText(text, btn) {
   btn.textContent = ok ? "Kopiert ✓" : "Bitte markieren und kopieren";
 }
 
-function showNotice({ tone = "err", title, text, detail, actions = [] }) {
+function showNotice({ tone = "err", title, text, steps = [], detail, actions = [] }) {
   const parts = [
     icon({ info: "info", ok: "check", warn: "warn" }[tone] || "alert"),
     h("div", { class: "notice-title" }, title),
     text ? h("p", { class: "notice-text" }, text) : null,
+    steps.length ? h("ol", { class: "notice-steps" }, steps.map((s) => h("li", {}, s))) : null,
   ];
   if (actions.length) {
     parts.push(h("div", { class: "notice-actions" },
@@ -587,6 +591,36 @@ async function doRollback(entry) {
   }
 }
 
+// --- signing key ---------------------------------------------------------------------
+
+async function createKey() {
+  clearNotice();
+  setBusy(true);
+  try {
+    const res = await invoke("create_signing_key", { path: "" });
+    const field = el("signKey");
+    field.value = res.secretPath;
+    field.dispatchEvent(new Event("input"));
+    showNotice({
+      tone: "ok",
+      title: "Signatur-Schlüssel erzeugt",
+      steps: [
+        `Sichere die Datei ${res.secretPath} (z. B. im Passwortmanager oder auf einem USB-Stick). ` +
+          "Sie darf nie ins Repository und nie an andere – wer sie hat, kann Spielern Mods unterschieben.",
+        res.keysFile
+          ? `Der öffentliche Schlüssel steht jetzt in ${res.keysFile}. Committe diese Datei und veröffentliche eine neue Version der Spieler-App – erst die prüft Signaturen.`
+          : "Trag den öffentlichen Schlüssel (Knopf unten) als neue Zeile in keys/manifest-signing.pub ein, committe sie und veröffentliche eine neue Version der Spieler-App – erst die prüft Signaturen.",
+        "Ab jetzt signiert veröffentlichen: Der Pfad ist oben schon eingetragen. Ältere Spieler-Apps ignorieren die Signatur einfach.",
+      ],
+      actions: [["Öffentlichen Schlüssel kopieren", (ev) => copyText(res.publicKey, ev.currentTarget)]],
+    });
+  } catch (e) {
+    showError("Schlüssel konnte nicht erzeugt werden", e);
+  } finally {
+    setBusy(false);
+  }
+}
+
 // --- startup ------------------------------------------------------------------------
 
 function loadSettings() {
@@ -606,6 +640,7 @@ async function init() {
   publishBtn.addEventListener("click", askPublish);
   sshTestBtn.addEventListener("click", sshTest);
   historyBtn.addEventListener("click", loadHistory);
+  el("keygenBtn").addEventListener("click", createKey);
   el("confirmNo").addEventListener("click", closeConfirm);
   el("confirmYes").addEventListener("click", doPublish);
   el("confirmDialog").addEventListener("keydown", (e) => {
