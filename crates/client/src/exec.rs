@@ -98,6 +98,7 @@ mod tests {
                 mod_id: None,
                 mod_version: None,
                 mod_name: None,
+                required: None,
                 url: "u".into(),
             },
             replaces: replaces.map(str::to_string),

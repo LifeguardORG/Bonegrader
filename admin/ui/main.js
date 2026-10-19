@@ -9,7 +9,7 @@ const TEXT_FIELDS = [
   "instance", "mcVersion", "loaderType", "loaderVersion",
   "channel", "pack", "baseUrl", "sshHost", "remoteBase", "ignore",
   "signKey", "minClientVersion", "latestClientVersion", "clientDownloadUrl",
-  "serverName", "serverAddress", "seeds",
+  "serverName", "serverAddress", "seeds", "serverExport",
 ];
 // Machine-specific values (paths, SSH target) have no defaults: the repo is
 // public, and every admin's setup differs. Values typed once are remembered.
@@ -131,7 +131,29 @@ function settings() {
   s.ignore = lines("ignore");
   s.seeds = lines("seeds");
   s.gc = el("gc").checked;
+  s.requiredChoices = choicesFor(s.channel);
   return s;
+}
+
+// Pflicht choices made in the preview, per channel, until they are published
+// (mark key -> mandatory). Kept across restarts of the app.
+function allChoices() {
+  try {
+    return JSON.parse(load("admin.requiredChoices") || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function choicesFor(channel) {
+  return allChoices()[channel] || {};
+}
+
+function setChoices(channel, choices) {
+  const all = allChoices();
+  if (Object.keys(choices).length) all[channel] = choices;
+  else delete all[channel];
+  store("admin.requiredChoices", JSON.stringify(all));
 }
 
 // --- validation ---------------------------------------------------------------------
@@ -171,6 +193,9 @@ function validate(s) {
   }
   if (s.remoteBase && (!PLAIN.test(s.remoteBase) || !/^[/~]/.test(s.remoteBase))) {
     v.remoteBase = ["err", "Absoluter Pfad, z. B. /srv/bonegrader (ohne Leer- und Sonderzeichen)."];
+  }
+  if (/^[^/\\:]{2,}:[/~]/.test(s.serverExport) && !PLAIN.test(s.serverExport)) {
+    v.serverExport = ["err", "Form: nutzer@server:/pfad/zur/client-requirements.json (ohne Leer- und Sonderzeichen)."];
   }
   for (const f of ["minClientVersion", "latestClientVersion"]) {
     if (s[f] && !VERSION.test(s[f])) v[f] = ["err", "Versionsnummer wie 1.2.0"];
@@ -395,7 +420,120 @@ function renderPreview(res) {
   if (res.noModId.length > 0) {
     body.append(h("p", { class: "nomod" }, "Ohne modId (Erkennung über den Dateinamen): " + res.noModId.join(", ")));
   }
+  renderRequired(res);
   resultCard.classList.remove("hidden");
+}
+
+// --- Pflicht-Mods -------------------------------------------------------------------
+
+const SOURCE_TEXT = { choice: "von dir gewählt", previous: "wie bisher", server: "laut Server", default: "Standard (Pflicht)" };
+
+/** Marked differently from what the server says players need. */
+const differs = (r) => r.suggested != null && r.suggested !== r.required;
+
+function requiredSummary(rows) {
+  const n = rows.filter((r) => r.required).length;
+  const diff = rows.filter(differs).length;
+  return `${n} Pflicht · ${rows.length - n} optional` + (diff ? ` · ${diff} abweichend vom Server` : "");
+}
+
+function requiredRow(r, res, summaryNode) {
+  const title = r.name || baseName(r.path).replace(/\.jar$/i, "");
+  const cb = h("input", { type: "checkbox" });
+  cb.checked = r.required;
+  const row = h("div", { class: "diff-row req-row" },
+    r.new ? h("span", { class: "tag neu" }, "neu") : null,
+    h("div", { class: "what" },
+      h("div", {}, h("span", { class: "title" }, title), r.version ? h("span", { class: "ver" }, r.version) : null),
+      h("div", { class: "why" }, [...r.reasons, SOURCE_TEXT[r.source]].filter(Boolean).join(" · "))),
+    h("label", { class: "check req-toggle" }, cb, "Pflicht"));
+  const mark = () => {
+    row.classList.toggle("differs", differs(r));
+    // Optional although the server needs it: players who switch it off can't join.
+    row.classList.toggle("danger", r.suggested === true && !r.required);
+  };
+  mark();
+  cb.addEventListener("change", () => {
+    const channel = settings().channel;
+    const choices = choicesFor(channel);
+    choices[r.key] = cb.checked;
+    setChoices(channel, choices);
+    r.required = cb.checked;
+    r.source = "choice";
+    row.querySelector(".why").textContent = [...r.reasons, SOURCE_TEXT.choice].join(" · ");
+    mark();
+    summaryNode.textContent = requiredSummary(res.marking.rows);
+  });
+  return row;
+}
+
+function reqGroup(title, rows, open) {
+  if (!rows.length) return null;
+  return h("details", { class: "diff-group", open },
+    h("summary", {}, `${title} `, h("span", { class: "count" }, `(${rows.length})`)), rows);
+}
+
+function renderRequired(res) {
+  const box = el("requiredBody");
+  box.replaceChildren();
+  const rows = res.marking.rows;
+  const check = res.marking.check;
+  const summaryNode = h("span", { class: "pill" }, requiredSummary(rows));
+  put(box, h("h3", {}, "Pflicht-Mods"), h("div", { class: "summary" }, summaryNode,
+    check ? h("span", { class: "pill" }, `Server-Export vom ${formatWhen(check.generatedAt)}`) : null));
+
+  if (res.exportError) {
+    box.append(h("div", { class: "box err", role: "alert" }, h("h3", {}, "Server-Export nicht lesbar"),
+      h("p", {}, res.exportError), h("p", {}, "Ohne Export kann nicht veröffentlicht werden, solange er eingetragen ist – Pfad prüfen oder Feld leeren.")));
+  } else if (!check) {
+    box.append(h("div", { class: "box info" }, h("h3", {}, "Ohne Server-Export"),
+      h("p", {}, "Markierungen kommen vom Live-Stand, neue Mods gelten als Pflicht. Mit dem Export des Server-Mods bonegraderexport " +
+        "(Feld unter „Server (SSH)“) schlägt die App vor, was Spieler wirklich brauchen, und prüft Pack und Server.")));
+  }
+  if (check) {
+    const errs = check.missingInPack.map((j) =>
+      h("p", {}, `${j.name || j.serverFile}: auf dem Server Pflicht, fehlt aber im Pack (${j.reasons.join(" · ")}).`));
+    if (errs.length) {
+      box.append(h("div", { class: "box err", role: "alert" },
+        h("h3", {}, "Spieler kommen so nicht auf den Server"), errs,
+        h("p", {}, "Mod ins Pack aufnehmen – oder vom Server nehmen, falls er dort nicht gebraucht wird.")));
+    }
+    const warns = [];
+    if (!check.complete) warns.push(`Der Export ist unvollständig: ${check.problems.join("; ")}`);
+    if (check.loaderMismatch) warns.push(`Loader unterschiedlich – ${check.loaderMismatch}`);
+    for (const v of check.versionMismatch) {
+      warns.push(`${v.name || baseName(v.packPath)}: im Pack ${baseName(v.packPath)}, auf dem Server ${v.serverFile} – abweichende Versionen können Spieler abweisen.`);
+    }
+    if (warns.length) box.append(h("div", { class: "box warn" }, h("h3", {}, "Pack und Server weichen ab"), warns.map((w) => h("p", {}, w))));
+  }
+
+  const tools = h("div", { class: "tools" });
+  if (rows.some(differs)) {
+    tools.append(h("button", { class: "ghost small", type: "button", onclick: () => {
+      const channel = settings().channel;
+      const choices = choicesFor(channel);
+      for (const r of rows.filter(differs)) {
+        choices[r.key] = r.suggested;
+        r.required = r.suggested;
+        r.source = "choice";
+      }
+      setChoices(channel, choices);
+      renderRequired(res);
+    } }, "Server-Vorschläge übernehmen"));
+  }
+  if (Object.keys(choicesFor(settings().channel)).length) {
+    tools.append(h("button", { class: "ghost small", type: "button", onclick: () => {
+      setChoices(settings().channel, {});
+      doPreview();
+    } }, "Eigene Auswahl verwerfen"));
+  }
+  if (tools.childElementCount) box.append(tools);
+
+  const make = (list) => list.map((r) => requiredRow(r, res, summaryNode));
+  put(box,
+    reqGroup("Weicht vom Server ab", make(rows.filter(differs)), true),
+    reqGroup("Pflicht", make(rows.filter((r) => r.required && !differs(r))), false),
+    reqGroup("Optional", make(rows.filter((r) => !r.required && !differs(r))), false));
 }
 
 function showProgress(visible) {
@@ -460,6 +598,9 @@ function askPublish() {
     h("li", { class: res.loaderSource === "previous" || res.liveLoader ? "warn" : null },
       `${res.liveLoader ? `Loader: ${res.liveLoader} → ` : "Loader: "}${res.loader} – ${res.loaderOrigin}`),
     h("li", {}, `Ziel: ${res.target || `${s.sshHost}:${s.remoteBase}/${s.channel}`}`),
+    h("li", { class: res.marking.check?.missingInPack.length || res.exportError ? "warn" : null },
+      `Pflicht-Mods: ${requiredSummary(res.marking.rows)}` +
+        (res.marking.check?.missingInPack.length ? ` – ⚠ ${res.marking.check.missingInPack.length} Pflicht-Mod(s) des Servers fehlen im Pack` : "")),
     h("li", { class: signing[0] === "warn" ? "warn" : null }, signing[0] === "warn" ? "⚠ unsigniert" : "✓ signiert"),
     s.minClientVersion ? h("li", {}, `Spieler-App mindestens ${s.minClientVersion}`) : null,
     h("li", { class: "muted" }, "Der bisherige Stand wird im Verlauf gesichert und lässt sich zurückholen.")
@@ -485,6 +626,7 @@ async function doPublish() {
   try {
     const res = await invoke("publish", { settings: s });
     showProgress(false);
+    setChoices(s.channel, {}); // published: the live manifest carries them now
     let msg = `${count(res.files, "Datei", "Dateien")}, ${res.signed ? "signiert" : "unsigniert"}`;
     if (res.gcRemoved) msg += `, ${res.gcRemoved} alte Dateien lokal aufgeräumt`;
     showNotice({

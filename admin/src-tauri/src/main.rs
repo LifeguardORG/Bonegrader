@@ -5,6 +5,7 @@
 //! the SSH connection, and roll a channel back. Thin GUI over the
 //! `bonegrader_publish` library (same logic as the CLI and deploy scripts).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bonegrader_client::errors::{Kind, Report};
@@ -13,12 +14,14 @@ use bonegrader_client::session::{fetch_manifest, trusted_keys};
 use bonegrader_core::manifest::{ClientInfo, Loader, Manifest, ServerInfo};
 use bonegrader_core::sign::{PublicKey, SecretKey};
 use bonegrader_publish::remote::{
-    list_history, rollback, test_connection, upload_channel, Connection, HistoryEntry, Remote,
+    list_history, read_export, rollback, test_connection, upload_channel, Connection, HistoryEntry,
+    Remote,
 };
+use bonegrader_publish::required::{self, Marking, ServerExport};
 use bonegrader_publish::{
     build_manifest, category_counts, detect_loader, diff_manifests, game_dir, gc_store, keygen,
-    load_signing_key, populate_store, sign_manifest, write_manifest, BuildOptions, Built,
-    LoaderSource, ManifestDiff,
+    load_signing_key, populate_store, sign_manifest, switched_off_warnings, write_manifest,
+    BuildOptions, Built, LoaderSource, ManifestDiff,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -63,6 +66,12 @@ struct Settings {
     remote_base: String,
     #[serde(default)]
     gc: bool,
+    /// The server's requirements export: a file or `user@host:/path`.
+    #[serde(default)]
+    server_export: String,
+    /// Pflicht choices made in the preview (mark key -> mandatory).
+    #[serde(default)]
+    required_choices: BTreeMap<String, bool>,
 }
 
 fn opt(s: &str) -> Option<String> {
@@ -116,6 +125,36 @@ impl Settings {
     fn build(&self, live: Option<&Manifest>) -> anyhow::Result<Built> {
         let previous = live.map(|m| m.loader.clone());
         build_manifest(&expand_home(&self.instance), &self.build_options(previous))
+    }
+
+    /// The server export, if one is configured: `Err` if it can't be used.
+    fn export(&self) -> anyhow::Result<Option<ServerExport>> {
+        opt(&self.server_export)
+            .map(|spec| read_export(&spec).and_then(|b| required::parse_export(&b)))
+            .transpose()
+    }
+
+    /// Build and decide the Pflicht marking — the same for preview and
+    /// publish. An unusable export is returned as its error message, not
+    /// fatal: the preview shows it, publishing refuses.
+    fn build_marked(
+        &self,
+        live: Option<&Manifest>,
+    ) -> anyhow::Result<(Built, Marking, Option<String>)> {
+        let mut built = self.build(live)?;
+        let (export, export_error) = match self.export() {
+            Ok(e) => (e, None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
+        let marking = required::mark(
+            &mut built.manifest,
+            live,
+            export.as_ref(),
+            &self.required_choices,
+        );
+        let switched_off = switched_off_warnings(&built, live);
+        built.warnings.extend(switched_off);
+        Ok((built, marking, export_error))
     }
 
     fn key(&self) -> anyhow::Result<Option<SecretKey>> {
@@ -242,6 +281,10 @@ struct PreviewResult {
     signing: Signing,
     /// `deploy@host:/srv/bonegrader/main`, if the SSH fields are filled in.
     target: Option<String>,
+    /// Pflicht marking per mod and the comparison with the server.
+    marking: Marking,
+    /// Why the configured server export can't be used.
+    export_error: Option<String>,
 }
 
 /// Build the manifest from the instance and diff it against the live server one.
@@ -249,7 +292,7 @@ struct PreviewResult {
 async fn preview(settings: Settings) -> Result<PreviewResult, Report> {
     blocking(move || {
         let live = settings.live();
-        let built = settings.build(live.as_ref())?;
+        let (built, marking, export_error) = settings.build_marked(live.as_ref())?;
         let key = settings.key()?; // fail early on a wrong key path
         let signing = Signing::check(key.as_ref())?;
         let diff = diff_manifests(live.as_ref(), &built.manifest);
@@ -278,6 +321,8 @@ async fn preview(settings: Settings) -> Result<PreviewResult, Report> {
             live_generated_at: live.map(|m| m.generated_at),
             signing,
             target: settings.target(),
+            marking,
+            export_error,
         })
     })
     .await
@@ -321,7 +366,10 @@ async fn publish(app: AppHandle, settings: Settings) -> Result<PublishResult, Re
         }
 
         phase("build");
-        let built = settings.build(settings.live().as_ref())?;
+        let (built, _, export_error) = settings.build_marked(settings.live().as_ref())?;
+        if let Some(e) = export_error {
+            anyhow::bail!("Server-Export nicht lesbar ({e}) – bitte Vorschau erneut ausführen.");
+        }
         let channel = built.manifest.channel.clone();
         let out = store_root.join(&channel);
         let new_blobs = populate_store(&built.game_dir, &out, &built.manifest)?;

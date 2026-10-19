@@ -126,6 +126,7 @@ pub fn entry(cat: Category, path: &str, content: &[u8], mod_id: Option<&str>) ->
         mod_id: mod_id.map(str::to_string),
         mod_version: None,
         mod_name: None,
+        required: None,
         url: format!("files/by-hash/{sha1}"),
     }
 }

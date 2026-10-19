@@ -444,6 +444,7 @@ mod tests {
             mod_id: mod_id.map(str::to_string),
             mod_version: None,
             mod_name: None,
+            required: None,
             url: format!("files/by-hash/{sha1}"),
         }
     }
@@ -1146,6 +1147,7 @@ mod tests {
                             mod_id,
                             mod_version: None,
                             mod_name: None,
+                            required: None,
                             url: String::new(),
                         });
                     }

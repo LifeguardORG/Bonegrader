@@ -58,6 +58,11 @@ pub struct FileEntry {
     /// the file name. Optional: older manifests and libraries have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mod_name: Option<String>,
+    /// Whether players need the mod to join the server (marked as mandatory
+    /// in the player app; they can still switch it off). Mods only. `None` in
+    /// manifests from before the marking existed: unknown, not "optional".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
     pub url: String,
 }
 
@@ -230,6 +235,7 @@ mod tests {
             mod_id: None,
             mod_version: None,
             mod_name: None,
+            required: None,
             url: format!("files/by-hash/{sha1}"),
         }
     }
@@ -258,6 +264,7 @@ mod tests {
             mod_id: Some("create".into()),
             mod_version: Some("6.0.10".into()),
             mod_name: None,
+            required: Some(true),
             sha256: Some("ab".repeat(32)),
             ..entry(Category::Mod, "mods/create-1.21.1-6.0.10.jar", SHA_A)
         }]);
@@ -276,6 +283,7 @@ mod tests {
         assert!(json.contains("\"modId\""));
         assert!(json.contains("\"minVersion\""));
         assert!(json.contains("\"category\": \"mod\""));
+        assert!(json.contains("\"required\": true"));
         let back = Manifest::from_json(&json).unwrap();
         assert_eq!(m, back);
     }
@@ -287,6 +295,10 @@ mod tests {
         assert!(!json.contains("modId"));
         assert!(!json.contains("modVersion"));
         assert!(!json.contains("sha256"));
+        assert!(
+            !json.contains("required"),
+            "unknown stays absent, not false"
+        );
 
         let m = manifest(vec![e]);
         let json = serde_json::to_string(&m).unwrap();

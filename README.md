@@ -106,9 +106,23 @@ cargo run -p bonegrader-cli -- undo   --instance <pfad>
 ```bash
 cargo run --release -p bonegrader-publish -- build \
   --instance <instanz> --out ./dist/main --channel main \
-  --sign-key ~/.config/bonegrader/manifest-signing.key   # zeigt Diff, --gc räumt auf
+  --sign-key ~/.config/bonegrader/manifest-signing.key \
+  --server-export <nutzer>@<mc-server>:/opt/minecraft/bonegrader/client-requirements.json
+  # zeigt Diff und Pflicht-Mods; --required/--optional <modId> markiert von Hand, --gc räumt auf
 deploy/deploy.sh ./dist/main deploy@<server> /srv/bonegrader main
 ```
+
+**Pflicht-Mods:** Das Manifest markiert jeden Mod als Pflicht oder optional;
+die Spieler-App zeigt das an (Pflicht-Mods lassen sich abschalten, dann kommt
+man aber nicht auf den Server). Woher die Markierung kommt: eigene Wahl vor der
+Markierung des letzten Stands vor dem Vorschlag des Servers; ohne alles gilt
+ein Mod als Pflicht. Den Vorschlag liefert der Server-Mod `bonegraderexport`
+(Repo bab-perf): Er schreibt bei jedem Serverstart
+`bonegrader/client-requirements.json` – pro Mod, ob Spieler ihn zum Beitreten
+brauchen und warum (Pflicht-Netzwerkkanäle, synchronisierte Registry-Einträge
+wie Blöcke, Items, Partikel oder Statuseffekte). Mit dem Export prüfen
+Publisher und Admin-App außerdem Pack gegen Server: Pflicht-Mods des Servers,
+die im Pack fehlen, abweichende Versionen, unterschiedlicher Loader.
 
 Oder per **Admin-App** (`cargo run -p bonegrader-admin`): Instanz-Ordner wählen
 (der Ordner mit `mods/`, egal aus welchem Launcher – die App zeigt sofort, welche
@@ -119,6 +133,10 @@ Veröffentlichen – mit Bestätigung und Zusammenfassung. Die App prüft, ob di
 Spieler-App den Stand annehmen würde (Signatur, Schlüssel), und sperrt das
 Veröffentlichen sonst; das Formular wird schon beim Tippen geprüft. Unter
 **„Verlauf & Rollback“** lässt sich ein früherer Stand per Klick zurückholen.
+Mit eingetragenem **Server-Export** (unter „Server (SSH)“) zeigt die Vorschau
+die Pflicht-Mods mit Begründung, markiert Abweichungen vom Server und die
+Ergebnisse des Abgleichs; Mods, die in der eigenen Instanz deaktiviert sind
+und deshalb aus dem Pack fallen würden, werden gemeldet.
 Hosting, Deploy-Nutzer, Signatur einrichten, Beta-Channel und Rollback: siehe
 [`deploy/README.md`](deploy/README.md).
 

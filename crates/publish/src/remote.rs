@@ -112,6 +112,34 @@ fn run(mut cmd: impl BorrowMut<Command>) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Read the server's requirements export: a local file, or `host:/path`
+/// (`host:~/path`) read over SSH — that login needs read access only.
+pub fn read_export(spec: &str) -> Result<Vec<u8>> {
+    let spec = spec.trim();
+    match split_remote(spec) {
+        Some((host, path)) => {
+            if !is_plain_arg(host) || !is_plain_arg(path) {
+                bail!("Server-Export {spec:?} enthält unzulässige Zeichen (erlaubt: Buchstaben, Ziffern, / @ . _ ~ : -)");
+            }
+            let mut c = Command::new("ssh");
+            c.args(SSH_OPTS).arg(host).arg(format!("cat -- {path}"));
+            Ok(run(c)
+                .with_context(|| format!("Server-Export von {host} lesen"))?
+                .into_bytes())
+        }
+        None => std::fs::read(spec).with_context(|| format!("Server-Export {spec} lesen")),
+    }
+}
+
+/// `host:/path` or `host:~/path`; `None` for local paths (also `C:\…`, `C:/…`).
+fn split_remote(spec: &str) -> Option<(&str, &str)> {
+    let (host, path) = spec.split_once(':')?;
+    let remote = host.len() > 1
+        && !host.contains(['/', '\\'])
+        && (path.starts_with('/') || path.starts_with('~'));
+    remote.then_some((host, path))
+}
+
 /// UTC stamp for history file names (no ':' — Windows-safe if copied).
 fn stamp() -> String {
     let n = OffsetDateTime::now_utc();
@@ -333,6 +361,26 @@ pub fn rollback(remote: &Remote, channel: &str, name: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_sources_are_told_apart() {
+        assert_eq!(
+            split_remote("root@62.171.170.74:/opt/minecraft/bonegrader/client-requirements.json"),
+            Some((
+                "root@62.171.170.74",
+                "/opt/minecraft/bonegrader/client-requirements.json"
+            ))
+        );
+        assert_eq!(
+            split_remote("mc:~/bonegrader/x.json"),
+            Some(("mc", "~/bonegrader/x.json"))
+        );
+        assert_eq!(split_remote("/home/me/x.json"), None);
+        assert_eq!(split_remote("C:\\Users\\me\\x.json"), None);
+        assert_eq!(split_remote("C:/Users/me/x.json"), None);
+        assert_eq!(split_remote("./x.json"), None);
+        assert!(read_export("evil$(rm):/x").is_err());
+    }
 
     #[test]
     fn arguments_are_checked() {

@@ -2,13 +2,16 @@
 //! Scans an instance, builds the channel manifest, shows the diff vs. what's live,
 //! signs it and populates the content-addressed store for upload.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use bonegrader_core::manifest::{ClientInfo, Manifest, ServerInfo};
+use bonegrader_publish::required::{self, Marking};
 use bonegrader_publish::{
     build_manifest, category_counts, diff_manifests, gc_store, keygen, load_signing_key,
-    populate_store, sign_manifest, write_manifest, BuildOptions, ManifestDiff,
+    populate_store, remote, sign_manifest, switched_off_warnings, write_manifest, BuildOptions,
+    ManifestDiff,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -85,6 +88,18 @@ struct BuildArgs {
     /// Server address added to the players' multiplayer list.
     #[arg(long)]
     server_address: Option<String>,
+    /// The server's client-requirements.json (written by the bonegraderexport
+    /// server mod): a file, or `user@host:/path` read over SSH. Suggests which
+    /// mods players must have and compares pack and server.
+    #[arg(long)]
+    server_export: Option<String>,
+    /// Mark a mod as mandatory: its modId, or its path for mods without one
+    /// (repeatable; beats earlier markings and the export).
+    #[arg(long, value_name = "MODID")]
+    required: Vec<String>,
+    /// Mark a mod as optional (repeatable).
+    #[arg(long, value_name = "MODID")]
+    optional: Vec<String>,
     /// Compute and print the diff only; write nothing.
     #[arg(long)]
     dry_run: bool,
@@ -162,16 +177,40 @@ fn build(args: BuildArgs) -> Result<()> {
         server,
         seeds: args.seed,
     };
-    let built = build_manifest(&args.instance, &opts)?;
+    let mut built = build_manifest(&args.instance, &opts)?;
+    let export = args
+        .server_export
+        .as_deref()
+        .map(|spec| remote::read_export(spec).and_then(|b| required::parse_export(&b)))
+        .transpose()?;
+    let mut choices = BTreeMap::new();
+    choices.extend(args.required.iter().map(|k| (k.clone(), true)));
+    choices.extend(args.optional.iter().map(|k| (k.clone(), false)));
+    let marking = required::mark(
+        &mut built.manifest,
+        previous.as_ref(),
+        export.as_ref(),
+        &choices,
+    );
+    for key in choices.keys() {
+        if !marking.rows.iter().any(|r| &r.key == key) {
+            eprintln!("  warning: --required/--optional {key}: no such mod in the pack");
+        }
+    }
 
     for path in &built.no_modid {
         eprintln!("  note: no modId for {path} (file-name identity)");
     }
-    for w in &built.warnings {
+    for w in built
+        .warnings
+        .iter()
+        .chain(&switched_off_warnings(&built, previous.as_ref()))
+    {
         eprintln!("  warning: {w}");
     }
 
     print_diff(&diff_manifests(previous.as_ref(), &built.manifest));
+    print_marking(&marking);
 
     let (mods, rp, sh) = category_counts(&built.manifest);
     let ign = if built.ignored > 0 {
@@ -236,8 +275,12 @@ fn print_diff(d: &ManifestDiff) {
         );
         return;
     }
+    for c in &d.required_changed {
+        let now = if c.required { "mandatory" } else { "optional " };
+        println!("  * {now} {}", c.path);
+    }
     if d.is_empty() {
-        println!("No changes vs. previous manifest.");
+        println!("No file changes vs. previous manifest.");
         return;
     }
     println!("Changes vs. previous manifest:");
@@ -259,5 +302,64 @@ fn print_diff(d: &ManifestDiff) {
     }
     for p in &d.removed {
         println!("  - remove {p}");
+    }
+}
+
+fn print_marking(m: &Marking) {
+    let required = m.rows.iter().filter(|r| r.required).count();
+    println!(
+        "\nMandatory for players: {required} of {} mods{}",
+        m.rows.len(),
+        if m.check.is_some() {
+            " (server export used)"
+        } else {
+            " (no --server-export: earlier markings, new mods mandatory)"
+        }
+    );
+    for r in &m.rows {
+        if let Some(s) = r.suggested.filter(|&s| s != r.required) {
+            let why = if r.reasons.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", r.reasons.join("; "))
+            };
+            if s {
+                println!(
+                    "  ! {}: marked optional, but the server needs it{why}",
+                    r.path
+                );
+            } else {
+                println!(
+                    "  ? {}: marked mandatory, the server doesn't need it{why}",
+                    r.path
+                );
+            }
+        }
+    }
+    let Some(c) = &m.check else { return };
+    if !c.complete {
+        println!(
+            "WARNING: the server export is incomplete: {}",
+            c.problems.join("; ")
+        );
+    }
+    if let Some(l) = &c.loader_mismatch {
+        println!("WARNING: loader differs – {l}");
+    }
+    for j in &c.missing_in_pack {
+        println!(
+            "ERROR: {} is needed to join the server but missing in the pack ({})",
+            j.server_file,
+            j.reasons.join("; ")
+        );
+    }
+    for v in &c.version_mismatch {
+        println!(
+            "WARNING: {} differs from the server's {} – players may be refused",
+            v.pack_path, v.server_file
+        );
+    }
+    if !c.not_on_server.is_empty() {
+        println!("Client-only (not on the server): {}", c.not_on_server.len());
     }
 }

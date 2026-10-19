@@ -17,10 +17,11 @@ use bonegrader_core::manifest::{
     Category, ClientInfo, FileEntry, Loader, Manifest, SeedEntry, ServerInfo, SCHEMA_VERSION,
 };
 use bonegrader_core::paths::{is_safe_component, is_safe_seed_path, SEED_DIRS, SEED_FILES};
-use bonegrader_core::scan::{scan_instance, LocalFile};
+use bonegrader_core::scan::{scan_instance_cached, DisabledMods, LocalFile, ScanCache};
 use bonegrader_core::sign::{PublicKey, SecretKey, SIGNATURE_FILE};
 
 pub mod remote;
+pub mod required;
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -168,6 +169,8 @@ pub struct Built {
     pub no_modid: Vec<String>,
     /// Findings worth a look before publishing (nothing blocking).
     pub warnings: Vec<String>,
+    /// Mods switched off in the instance (`*.jar.disabled`): never published.
+    pub switched_off: Vec<LocalFile>,
 }
 
 /// Scan an instance and build its channel manifest (nothing is written).
@@ -184,8 +187,15 @@ pub fn build_manifest(instance: &Path, opts: &BuildOptions) -> Result<Built> {
     let (loader, loader_source) = resolve_loader(instance, opts)?;
     let instance = &game_dir(instance);
 
-    let mut local = scan_instance(instance, &CATEGORIES)
-        .with_context(|| format!("Instanz {} einlesen", instance.display()))?;
+    let (switched_off, mut local): (Vec<LocalFile>, Vec<LocalFile>) = scan_instance_cached(
+        instance,
+        &CATEGORIES,
+        DisabledMods::Include,
+        &mut ScanCache::default(),
+    )
+    .with_context(|| format!("Instanz {} einlesen", instance.display()))?
+    .into_iter()
+    .partition(|lf| lf.disabled);
     let ignore: BTreeSet<&str> = opts.ignore.iter().map(String::as_str).collect();
     let before = local.len();
     local
@@ -230,6 +240,7 @@ pub fn build_manifest(instance: &Path, opts: &BuildOptions) -> Result<Built> {
         ignored,
         no_modid,
         warnings,
+        switched_off,
     })
 }
 
@@ -343,6 +354,7 @@ fn build_entry(instance: &Path, lf: &LocalFile, base_url: &str) -> Result<FileEn
         mod_id: lf.mod_ids.first().cloned(),
         mod_version: lf.mod_version.clone(),
         mod_name: lf.mod_name.clone(),
+        required: None,
         url: blob_url(base_url, &lf.sha1),
     })
 }
@@ -449,6 +461,17 @@ pub struct ManifestDiff {
     pub updated: Vec<ModUpdate>,
     /// Names/versions of the paths in `added`, `removed` and `changed`.
     pub labels: BTreeMap<String, EntryLabel>,
+    /// Mods whose Pflicht marking changed (both manifests marked them).
+    pub required_changed: Vec<RequiredChange>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequiredChange {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub required: bool,
 }
 
 impl ManifestDiff {
@@ -530,6 +553,25 @@ pub fn diff_manifests(old: Option<&Manifest>, new: &Manifest) -> ManifestDiff {
             .is_none_or(|id| !updated_ids.contains(id))
     });
 
+    let old_marks: BTreeMap<String, bool> = old
+        .mods()
+        .filter_map(|f| Some((required::mark_key(f), f.required?)))
+        .collect();
+    let required_changed = new
+        .mods()
+        .filter_map(|f| {
+            let now = f.required?;
+            (old_marks
+                .get(&required::mark_key(f))
+                .is_some_and(|&was| was != now))
+            .then(|| RequiredChange {
+                path: f.path.clone(),
+                name: f.mod_name.clone(),
+                required: now,
+            })
+        })
+        .collect();
+
     let added: Vec<String> = added.iter().map(|f| f.path.clone()).collect();
     let removed: Vec<String> = removed.iter().map(|f| f.path.clone()).collect();
     let listed: Vec<String> = added
@@ -545,7 +587,33 @@ pub fn diff_manifests(old: Option<&Manifest>, new: &Manifest) -> ManifestDiff {
         removed,
         changed,
         updated,
+        required_changed,
     }
+}
+
+/// Mods switched off in the admin's instance that the live pack contains:
+/// publishing would take them away from every player.
+pub fn switched_off_warnings(built: &Built, live: Option<&Manifest>) -> Vec<String> {
+    let Some(live) = live else {
+        return Vec::new();
+    };
+    built
+        .switched_off
+        .iter()
+        .filter(|lf| {
+            live.mods().any(|f| {
+                f.path == lf.enabled_path() || f.mod_id.as_ref().is_some_and(|id| lf.mod_ids.contains(id))
+            })
+        })
+        .map(|lf| {
+            let name = lf.mod_name.clone().unwrap_or_else(|| lf.file_name.clone());
+            format!(
+                "„{name}“ ist in deiner Instanz deaktiviert ({}) und fehlt deshalb im neuen Stand – \
+                 bisher war er im Pack. Zum Behalten in der Instanz wieder einschalten.",
+                lf.file_name
+            )
+        })
+        .collect()
 }
 
 /// Labels for `paths`, taken from `new` (or `old` for removed files).
@@ -720,6 +788,7 @@ mod tests {
             mod_id: mod_id.map(str::to_string),
             mod_version: None,
             mod_name: None,
+            required: None,
             url: format!("files/by-hash/{sha1}"),
         }
     }
@@ -839,6 +908,58 @@ mod tests {
             !d.labels.contains_key("mods/new.jar"),
             "no metadata, no label"
         );
+    }
+
+    #[test]
+    fn switched_off_mods_are_not_published_and_flagged_if_live() {
+        let inst = instance(&[
+            ("mods/a.jar", jar(&["a"])),
+            ("mods/b.jar.disabled", jar(&["b"])),
+            ("mods/mine.jar.disabled", jar(&["mine"])),
+        ]);
+        let built = build_manifest(inst.path(), &opts()).unwrap();
+        let paths: Vec<&str> = built
+            .manifest
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["mods/a.jar"]);
+        assert_eq!(built.switched_off.len(), 2);
+
+        let live = man(vec![
+            fe("mods/a.jar", "x", Some("a")),
+            fe("mods/b-1.0.jar", "y", Some("b")),
+        ]);
+        let w = switched_off_warnings(&built, Some(&live));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("b.jar.disabled"), "{w:?}");
+        assert!(switched_off_warnings(&built, None).is_empty());
+    }
+
+    #[test]
+    fn diff_lists_changed_markings_but_not_first_markings() {
+        let mark = |mut e: FileEntry, r: Option<bool>| {
+            e.required = r;
+            e
+        };
+        let old = man(vec![
+            mark(fe("mods/a.jar", "1", Some("a")), Some(true)),
+            mark(fe("mods/b.jar", "2", Some("b")), None),
+            mark(fe("mods/c.jar", "3", Some("c")), Some(false)),
+        ]);
+        let new = man(vec![
+            mark(fe("mods/a-2.jar", "4", Some("a")), Some(false)),
+            mark(fe("mods/b.jar", "2", Some("b")), Some(true)),
+            mark(fe("mods/c.jar", "3", Some("c")), Some(false)),
+        ]);
+        let d = diff_manifests(Some(&old), &new);
+        let changed: Vec<(&str, bool)> = d
+            .required_changed
+            .iter()
+            .map(|c| (c.path.as_str(), c.required))
+            .collect();
+        assert_eq!(changed, vec![("mods/a-2.jar", false)]);
     }
 
     #[test]

@@ -92,6 +92,11 @@
             <input id="remoteBase" type="text" spellcheck="false" placeholder="/srv/bonegrader" />
             <p class="field-msg" id="msg-remoteBase"></p>
           </div>
+          <div class="field full">
+            <label for="serverExport">Server-Export für Pflicht-Mods (vom Server-Mod bonegraderexport; Datei oder nutzer@server:/pfad; leer = ohne)</label>
+            <input id="serverExport" type="text" spellcheck="false" placeholder="nutzer@mc-server:/opt/minecraft/bonegrader/client-requirements.json" />
+            <p class="field-msg" id="msg-serverExport"></p>
+          </div>
         </div>
         <div class="inline-actions">
           <button id="sshTestBtn" class="ghost" type="button">Verbindung testen</button>
@@ -156,6 +161,7 @@
         <div id="summary" class="summary"></div>
         <div id="signBox"></div>
         <div id="diffBody"></div>
+        <div id="requiredBody" class="required"></div>
         <div id="progress" class="progress hidden">
           <div id="bar" class="bar" role="progressbar" aria-label="Fortschritt" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <div id="barFill" class="fill"></div>

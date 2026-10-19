@@ -265,6 +265,15 @@ select:focus { outline: none; border-color: var(--accent); }
 .tag.rem { background: var(--tag-rem); color: var(--danger); }
 .nomod { color: var(--warn); font-size: 12px; margin: 6px 0 0; }
 
+.required { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.required > h3 { margin: 0 0 8px; font-size: 14px; }
+.required .tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+.req-row .req-toggle { flex: none; margin-left: auto; font-size: 12px; }
+.req-row.differs { box-shadow: inset 3px 0 0 var(--warn); }
+.req-row.differs.danger { box-shadow: inset 3px 0 0 var(--danger); }
+.req-row .why { color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.tag.neu { background: var(--tag-add); color: var(--accent); }
+
 .progress { margin-top: 14px; }
 .progress .bar { height: 8px; background: var(--field); border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
 .progress .fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.2s ease; }
