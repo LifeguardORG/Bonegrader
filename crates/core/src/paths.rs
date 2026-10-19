@@ -20,6 +20,40 @@ pub const SEED_DIRS: [&str; 3] = ["config", "defaultconfigs", "kubejs"];
 /// Top-level files that may be seeded directly.
 pub const SEED_FILES: [&str; 1] = ["options.txt"];
 
+/// Suffix the launchers (CurseForge, Prism, Modrinth) append to switch a mod
+/// off: NeoForge only loads files ending in `.jar`.
+pub const DISABLED_SUFFIX: &str = ".disabled";
+
+/// `mods/x.jar` for a switched-off `mods/x.jar.disabled` (suffixes in any
+/// case); `None` for anything else.
+pub fn enabled_path(path: &str) -> Option<&str> {
+    let cut = path.len().checked_sub(DISABLED_SUFFIX.len())?;
+    let (stem, suffix) = (path.get(..cut)?, path.get(cut..)?);
+    (suffix.eq_ignore_ascii_case(DISABLED_SUFFIX) && is_mod_jar(stem)).then_some(stem)
+}
+
+/// The switched-off name of a mod path: `mods/x.jar` → `mods/x.jar.disabled`.
+pub fn disabled_path(path: &str) -> String {
+    format!("{path}{DISABLED_SUFFIX}")
+}
+
+/// The same mod with the other on/off state: `mods/x.jar` ⇄
+/// `mods/x.jar.disabled`. `None` for anything that is not a mod jar.
+pub fn toggled_path(path: &str) -> Option<String> {
+    if !path.starts_with("mods/") {
+        return None;
+    }
+    match enabled_path(path) {
+        Some(on) => Some(on.to_string()),
+        None => is_mod_jar(path).then(|| disabled_path(path)),
+    }
+}
+
+/// A file name (or path) NeoForge would load as a mod.
+pub fn is_mod_jar(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".jar")
+}
+
 /// The folder name for a category.
 pub fn category_dir(cat: Category) -> &'static str {
     match cat {
@@ -150,6 +184,30 @@ mod tests {
         assert!(!is_safe_seed_path("config\\a.toml"));
         assert!(!is_safe_seed_path("servers.dat"));
         assert!(!is_safe_seed_path(""));
+    }
+
+    #[test]
+    fn disabled_names() {
+        assert_eq!(enabled_path("mods/x.jar.disabled"), Some("mods/x.jar"));
+        assert_eq!(enabled_path("mods/X.JAR.Disabled"), Some("mods/X.JAR"));
+        assert_eq!(enabled_path("mods/x.jar"), None);
+        assert_eq!(enabled_path("mods/x.zip.disabled"), None);
+        assert_eq!(enabled_path(".disabled"), None);
+        assert_eq!(enabled_path("mods/ä.jar.disabled"), Some("mods/ä.jar"));
+        assert_eq!(enabled_path("mods/ä"), None, "no panic on short names");
+
+        assert_eq!(disabled_path("mods/x.jar"), "mods/x.jar.disabled");
+        assert_eq!(
+            toggled_path("mods/x.jar").as_deref(),
+            Some("mods/x.jar.disabled")
+        );
+        assert_eq!(
+            toggled_path("mods/x.jar.disabled").as_deref(),
+            Some("mods/x.jar")
+        );
+        assert_eq!(toggled_path("config/x.jar"), None);
+        assert_eq!(toggled_path("resourcepacks/x.zip"), None);
+        assert!(is_safe_managed_path(&disabled_path("mods/x.jar")));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use bonegrader_client::exec::Decisions;
 use bonegrader_client::fetch::Fetcher;
 use bonegrader_client::servers;
 use bonegrader_client::session::{
-    load_state, ClientCompat, SignatureStatus, StaleManifest, Updater,
+    load_state, undo_last, ClientCompat, SignatureStatus, StaleManifest, Updater,
 };
 use bonegrader_core::manifest::{Category, ClientInfo, Manifest, ServerInfo};
 use bonegrader_core::sign::{PublicKey, SecretKey};
@@ -365,4 +365,121 @@ fn the_plan_view_names_the_local_mods_it_touches() {
         2,
         "only files the plan refers to"
     );
+}
+
+/// Publish `files` as the server's current manifest (blobs included).
+fn publish_mods(server: &MockServer, files: &[(&str, &[u8], &str)]) {
+    for (_, content, _) in files {
+        server.put_blob(content);
+    }
+    let entries = files
+        .iter()
+        .map(|(path, content, id)| mod_entry(path, content, id))
+        .collect();
+    server.publish(&manifest(entries), None);
+}
+
+fn rename(i: &Path, from: &str, to: &str) {
+    std::fs::rename(i.join(from), i.join(to)).unwrap();
+}
+
+#[test]
+fn switched_off_mods_stay_off_and_old_leftovers_go() {
+    let inst = instance();
+    let i = inst.path();
+    let server = MockServer::new();
+    let up = updater(i, &server, &[]);
+    let create1 = named_jar("create", "1", "Create");
+    let create2 = named_jar("create", "2", "Create");
+    let xaero = named_jar("xaero", "1", "Xaero");
+    publish_mods(
+        &server,
+        &[
+            ("mods/create-1.jar", &create1, "create"),
+            ("mods/xaero.jar", &xaero, "xaero"),
+        ],
+    );
+    let p = up.prepare().unwrap();
+    up.apply(&p, &Decisions::default(), &opts(), "ts1", &|_| {})
+        .unwrap();
+
+    // The player switches Create off in their launcher. An older Bonegrader
+    // also left a switched-off copy of an old Xaero behind.
+    rename(i, "mods/create-1.jar", "mods/create-1.jar.disabled");
+    write(
+        &i.join("mods/xaero-0.jar.disabled"),
+        &named_jar("xaero", "0", "Xaero"),
+    );
+    // A mod of their own they switched off is none of the pack's business.
+    write(
+        &i.join("mods/mine.jar.disabled"),
+        &named_jar("mine", "1", "Mine"),
+    );
+    // Switching a mod off is no reason to download it again.
+    let p = up.prepare().unwrap();
+    assert!(p.plan.downloads.is_empty(), "{:?}", p.plan);
+
+    publish_mods(
+        &server,
+        &[
+            ("mods/create-2.jar", &create2, "create"),
+            ("mods/xaero.jar", &xaero, "xaero"),
+        ],
+    );
+    let p = up.prepare().unwrap();
+    let d = &p.plan.downloads;
+    assert_eq!(d.len(), 1, "{:?}", p.plan);
+    assert_eq!(d[0].target(), "mods/create-2.jar.disabled");
+    assert_eq!(d[0].replaces.as_deref(), Some("mods/create-1.jar.disabled"));
+    assert_eq!(p.plan.stale_disabled, vec!["mods/xaero-0.jar.disabled"]);
+    assert!(p.plan.user_extras.is_empty());
+    let json = serde_json::to_value(p.view()).unwrap();
+    assert_eq!(json["plan"]["downloads"][0]["disabled"], true);
+    assert_eq!(json["local"]["mods/xaero-0.jar.disabled"]["version"], "0");
+    up.apply(&p, &Decisions::default(), &opts(), "ts2", &|_| {})
+        .unwrap();
+
+    assert_eq!(
+        tree(&i.join("mods")),
+        vec!["create-2.jar.disabled", "mine.jar.disabled", "xaero.jar"]
+    );
+    let st = load_state(i).unwrap();
+    assert!(st.managed.contains_key("mods/create-2.jar"), "{st:?}");
+    assert!(up.prepare().unwrap().is_noop());
+
+    // Undo brings back exactly what was there, still switched off.
+    undo_last(i, "ts3").unwrap();
+    assert_eq!(
+        tree(&i.join("mods")),
+        vec![
+            "create-1.jar.disabled",
+            "mine.jar.disabled",
+            "xaero-0.jar.disabled",
+            "xaero.jar"
+        ]
+    );
+}
+
+#[test]
+fn undo_follows_a_mod_switched_after_the_update() {
+    let inst = instance();
+    let i = inst.path();
+    let server = MockServer::new();
+    let up = updater(i, &server, &[]);
+    let v1 = named_jar("jei", "1", "JEI");
+    let v2 = named_jar("jei", "2", "JEI");
+    publish_mods(&server, &[("mods/jei-1.jar", &v1, "jei")]);
+    let p = up.prepare().unwrap();
+    up.apply(&p, &Decisions::default(), &opts(), "ts1", &|_| {})
+        .unwrap();
+    publish_mods(&server, &[("mods/jei-2.jar", &v2, "jei")]);
+    let p = up.prepare().unwrap();
+    up.apply(&p, &Decisions::default(), &opts(), "ts2", &|_| {})
+        .unwrap();
+
+    // Switched off after the update: undoing it must not switch JEI back on.
+    rename(i, "mods/jei-2.jar", "mods/jei-2.jar.disabled");
+    undo_last(i, "ts3").unwrap();
+    assert_eq!(tree(&i.join("mods")), vec!["jei-1.jar.disabled"]);
+    assert_eq!(read(i.join("mods/jei-1.jar.disabled")), v1);
 }

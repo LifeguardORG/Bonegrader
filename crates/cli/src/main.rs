@@ -246,10 +246,16 @@ fn print_plan(p: &Prepared) {
         return;
     }
     for d in &plan.downloads {
+        let target = d.target();
+        let off = if d.disabled {
+            "  (stays switched off)"
+        } else {
+            ""
+        };
         match &d.replaces {
-            Some(old) if old == &d.entry.path => println!("  ~ update  {}", d.entry.path),
-            Some(old) => println!("  ~ update  {}  (replaces {old})", d.entry.path),
-            None => println!("  + install {}", d.entry.path),
+            Some(old) if old == &target => println!("  ~ update  {target}{off}"),
+            Some(old) => println!("  ~ update  {target}  (replaces {old}){off}"),
+            None => println!("  + install {target}{off}"),
         }
     }
     for r in &plan.removals {
@@ -257,6 +263,9 @@ fn print_plan(p: &Prepared) {
     }
     for d in &plan.duplicates {
         println!("  - remove  {d}  (identical copy of a pack file)");
+    }
+    for s in &plan.stale_disabled {
+        println!("  - remove  {s}  (switched-off leftover of a pack mod)");
     }
     for c in &plan.collisions {
         println!(

@@ -17,11 +17,13 @@ use crate::exec::ExecutionPlan;
 use crate::fetch::{is_permanent, resolve_url, Fetcher};
 use anyhow::{anyhow, bail, Context, Result};
 use bonegrader_core::hash::Hasher;
-use bonegrader_core::manifest::{is_lower_hex, Manifest};
-use bonegrader_core::paths::{is_safe_component, is_safe_managed_path, is_safe_seed_path};
+use bonegrader_core::manifest::{is_lower_hex, Category, Manifest};
+use bonegrader_core::paths::{
+    disabled_path, is_safe_component, is_safe_managed_path, is_safe_seed_path, toggled_path,
+};
 use bonegrader_core::state::{ClientState, ManagedEntry};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -141,6 +143,10 @@ pub struct BackedUp {
     pub original: String,
     /// Path relative to the backup folder.
     pub backup: String,
+    /// The installed file that took its place (a newer version), so an undo
+    /// can put it back in the on/off state the player gave the newer one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>,
 }
 
 /// The `update.json` written into each backup folder.
@@ -282,8 +288,11 @@ pub fn apply_with_progress(
 
 fn validate(exec: &ExecutionPlan) -> Result<()> {
     for d in &exec.downloads {
-        if !is_safe_managed_path(&d.entry.path) {
-            bail!("unsicherer Zielpfad: {}", d.entry.path);
+        if !is_safe_managed_path(&d.entry.path) || !is_safe_managed_path(&d.target()) {
+            bail!("unsicherer Zielpfad: {}", d.target());
+        }
+        if d.disabled && d.entry.category != Category::Mod {
+            bail!("nur Mods lassen sich deaktivieren: {}", d.entry.path);
         }
         for p in d.replaces.iter().chain(&d.local_copy) {
             if !is_safe_managed_path(p) {
@@ -670,10 +679,11 @@ impl<'a> Reporter<'a> {
 /// held open by another program.
 fn preflight(instance: &Path, exec: &ExecutionPlan) -> Result<()> {
     let mut paths: Vec<&String> = exec.deletions.iter().collect();
+    let targets: Vec<String> = exec.downloads.iter().map(|d| d.target()).collect();
     for d in &exec.downloads {
         paths.extend(d.replaces.iter());
-        paths.push(&d.entry.path);
     }
+    paths.extend(&targets);
     for rel in paths {
         let p = instance.join(rel);
         if p.exists() {
@@ -746,26 +756,27 @@ fn commit(
     }
 
     for rel in &exec.deletions {
-        if backup(instance, backup_root, rel, journal, &mut c)? {
+        if backup(instance, backup_root, rel, None, journal, &mut c)? {
             c.deleted += 1;
         }
     }
     for d in &exec.downloads {
+        let target = d.target();
         if let Some(r) = &d.replaces {
-            if backup(instance, backup_root, r, journal, &mut c)? {
+            if backup(instance, backup_root, r, Some(&target), journal, &mut c)? {
                 c.replaced += 1;
             }
         }
         // Anything still occupying the target (e.g. an unmanaged file).
-        backup(instance, backup_root, &d.entry.path, journal, &mut c)?;
+        backup(instance, backup_root, &target, None, journal, &mut c)?;
         install(
             tmp_dir,
             &d.entry.sha1,
             &mut uses,
-            &instance.join(&d.entry.path),
+            &instance.join(&target),
             journal,
         )?;
-        c.installed.push(d.entry.path.clone());
+        c.installed.push(target);
     }
     for s in &exec.seeds {
         let dst = instance.join(&s.path);
@@ -785,6 +796,7 @@ fn backup(
     instance: &Path,
     backup_root: &Path,
     rel: &str,
+    replaced_by: Option<&str>,
     journal: &mut Journal,
     c: &mut Committed,
 ) -> Result<bool> {
@@ -803,6 +815,7 @@ fn backup(
     c.backed_up.push(BackedUp {
         original: rel.to_string(),
         backup: backup_rel,
+        replaced_by: replaced_by.map(str::to_string),
     });
     Ok(true)
 }
@@ -979,7 +992,9 @@ fn remove_empty_dirs(dir: &Path) -> io::Result<()> {
 fn derive_state(instance: &Path, manifest: &Manifest, old: &ClientState) -> ClientState {
     let mut managed = BTreeMap::new();
     for e in &manifest.files {
-        if instance.join(&e.path).exists() {
+        let switched_off =
+            e.category == Category::Mod && instance.join(disabled_path(&e.path)).exists();
+        if instance.join(&e.path).exists() || switched_off {
             managed.insert(
                 e.path.clone(),
                 ManagedEntry {
@@ -1076,6 +1091,8 @@ pub struct RestoreReport {
 
 /// Undo the newest update that is not undone yet: take out the files it
 /// installed (kept in `<backup>/undone/`) and put the backed-up files back.
+/// Mods the player switched on or off since are followed to their current
+/// name, and the version they replaced comes back in the same state.
 /// Journalled like an update — on failure nothing changes.
 pub fn restore_last(instance: &Path, timestamp: &str) -> Result<RestoreReport> {
     let (dir, mut record) = last_restorable(instance)
@@ -1094,12 +1111,37 @@ pub fn restore_last(instance: &Path, timestamp: &str) -> Result<RestoreReport> {
         bail!("{} ist beschädigt", dir.join(RECORD_FILE).display());
     }
 
-    let undone = dir.join(UNDONE_DIR);
-    for rel in record
-        .installed
+    // Installed files under their current name, and those the player has
+    // switched on or off since.
+    let other_name = |rel: &str| toggled_path(rel).filter(|t| is_safe_managed_path(t));
+    let mut take_out: Vec<String> = Vec::new();
+    let mut switched: BTreeSet<&str> = BTreeSet::new();
+    for rel in &record.installed {
+        if instance.join(rel).exists() {
+            take_out.push(rel.clone());
+        } else if let Some(now) = other_name(rel).filter(|t| instance.join(t).exists()) {
+            switched.insert(rel);
+            take_out.push(now);
+        }
+    }
+    let put_back: Vec<(&BackedUp, String)> = record
+        .backed_up
         .iter()
-        .chain(record.backed_up.iter().map(|b| &b.original))
-    {
+        .map(|b| {
+            let follow = b
+                .replaced_by
+                .as_deref()
+                .is_some_and(|n| switched.contains(n));
+            let dst = follow
+                .then(|| other_name(&b.original))
+                .flatten()
+                .unwrap_or_else(|| b.original.clone());
+            (b, dst)
+        })
+        .collect();
+
+    let undone = dir.join(UNDONE_DIR);
+    for rel in take_out.iter().chain(put_back.iter().map(|(_, dst)| dst)) {
         let p = instance.join(rel);
         if p.exists() {
             ensure_movable(&p).with_context(|| format!("{rel} ist gesperrt"))?;
@@ -1109,22 +1151,19 @@ pub fn restore_last(instance: &Path, timestamp: &str) -> Result<RestoreReport> {
     let mut journal = Journal::default();
     let res = (|| -> Result<(usize, usize)> {
         let mut removed = 0;
-        for rel in &record.installed {
-            let p = instance.join(rel);
-            if p.exists() {
-                journal.move_file(&p, &unique_path(&undone.join(rel)))?;
-                removed += 1;
-            }
+        for rel in &take_out {
+            journal.move_file(&instance.join(rel), &unique_path(&undone.join(rel)))?;
+            removed += 1;
         }
         let mut restored = 0;
-        for b in &record.backed_up {
+        for (b, dst_rel) in &put_back {
             let src = dir.join(&b.backup);
             if !src.exists() {
                 continue;
             }
-            let dst = instance.join(&b.original);
+            let dst = instance.join(dst_rel);
             if dst.exists() {
-                journal.move_file(&dst, &unique_path(&undone.join(&b.original)))?;
+                journal.move_file(&dst, &unique_path(&undone.join(dst_rel)))?;
             }
             journal.move_file(&src, &dst)?;
             restored += 1;

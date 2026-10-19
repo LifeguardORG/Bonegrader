@@ -32,6 +32,10 @@ kein Dateien-Verschieben mehr.
 - Eigene Mods bleiben erhalten (auf Wunsch einzeln oder alle entfernen); bei
   Konflikten mit dem Pack fragt Bonegrader nach. Sieht die Instanz nicht nach
   dem Pack aus (z. B. ein anderes Modpack), musst du das erst bestätigen.
+- Mods, die du im Launcher deaktiviert hast (CurseForge, Prism & Co. benennen
+  sie in `….jar.disabled` um), bleiben deaktiviert: Neue Versionen davon werden
+  gleich deaktiviert installiert, auch „rückgängig“ ändert daran nichts. Alte,
+  deaktivierte Reste von Pack-Mods räumt Bonegrader ins Backup.
 - Ersetzte/entfernte Dateien landen in `.bonegrader-backup/` („Backup-Ordner
   öffnen“); **„Update vom … rückgängig“** stellt den vorherigen Stand wieder her.
 - Fehlt NeoForge (offizieller Launcher), richtet Bonegrader es auf Knopfdruck
@@ -59,7 +63,9 @@ installiert sie auf Knopfdruck – geprüft mit dem Updater-Schlüssel des Proje
 - Der Client scannt die Instanz, gleicht per SHA-1/`modId` gegen das Manifest ab
   und lädt nur Abweichungen. Das Manifest enthält die Mod-Namen und -Versionen
   aus den `mods.toml`, damit Spieler lesbare Änderungen sehen. Verwaltete Dateien werden getrackt, alles andere
-  gilt als Eigen-Mod und bleibt. Identische Doppel (z. B. `jei (1).jar`) werden
+  gilt als Eigen-Mod und bleibt. Deaktivierte Mods (`x.jar.disabled`, NeoForge
+  lädt nur `.jar`) zählen als `x.jar` im Zustand „aus“; ein Update ändert nie,
+  ob ein Mod an oder aus ist. Identische Doppel (z. B. `jei (1).jar`) werden
   erkannt und entfernt — zwei gleiche Mods würden das Spiel abstürzen lassen.
 - Downloads werden gestreamt, parallel geladen und vor jeder Änderung geprüft
   (Größe, SHA-1, SHA-256); bricht die Leitung ab, wird beim nächsten Versuch

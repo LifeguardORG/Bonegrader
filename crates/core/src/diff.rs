@@ -5,8 +5,15 @@
 //! *should* happen. It performs no I/O and mutates nothing on disk. Applying the
 //! plan (with the user's answers to the extras/collision prompts) is the
 //! caller's responsibility and must honour the invariants below.
+//!
+//! Mods the player switched off (`mods/x.jar.disabled`, the launchers'
+//! convention) are matched by their switched-on name (`mods/x.jar`, see
+//! [`LocalFile::enabled_path`]), which is also what the client state records.
+//! An update never changes whether a mod is on or off: a new version of a
+//! switched-off mod is installed switched off.
 
 use crate::manifest::{Category, FileEntry, Manifest};
+use crate::paths::disabled_path;
 use crate::scan::LocalFile;
 use crate::state::ClientState;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +32,21 @@ pub struct Download {
     /// verify the bytes like any download.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_copy: Option<String>,
+    /// Install switched off (at [`Download::target`]): the player had switched
+    /// off every copy of this mod.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+impl Download {
+    /// Where the file goes: the manifest path, or its `.disabled` name.
+    pub fn target(&self) -> String {
+        if self.disabled {
+            disabled_path(&self.entry.path)
+        } else {
+            self.entry.path.clone()
+        }
+    }
 }
 
 /// An unmanaged local mod that shares a `modId` with a mod the pack manages.
@@ -42,14 +64,17 @@ pub struct Collision {
 /// The proposed set of actions.
 ///
 /// # Safety invariants for the applier
-/// * Only ever delete paths listed in `removals`, `duplicates`, resolved
-///   `collisions`, chosen `user_extras`, or a download's `replaces` — never by
-///   scanning a folder.
+/// * Only ever delete paths listed in `removals`, `duplicates`,
+///   `stale_disabled`, resolved `collisions`, chosen `user_extras`, or a
+///   download's `replaces` — never by scanning a folder.
 /// * Every such path is already known to be inside a managed folder; still,
 ///   re-validate with [`crate::paths::is_safe_managed_path`] before deleting.
 /// * Download everything to a temp location and verify it *before* deleting
 ///   or moving anything; apply as one batch; move replaced/removed files to a
 ///   backup dir rather than hard-deleting.
+///
+/// All paths are real file names (`mods/x.jar.disabled` for a switched-off
+/// mod), except in `adopted`, which lists switched-on names like the state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdatePlan {
@@ -61,9 +86,16 @@ pub struct UpdatePlan {
     /// would load the mod twice and crash the game; removing them loses
     /// nothing (they are backed up like every removal).
     pub duplicates: Vec<String>,
-    /// Unmanaged local *mods* not in the manifest (ask keep/remove). Packs are
-    /// never listed here — the player's own resource/shader packs are kept
-    /// silently.
+    /// Switched-off leftovers of pack mods: an old or identical copy of a
+    /// pack mod, or a `.disabled` twin of a pack file that is switched on
+    /// (older Bonegrader versions re-installed mods the player had switched
+    /// off and left these behind). The game never loads them, so removing
+    /// them changes nothing in game; they are backed up like every removal.
+    pub stale_disabled: Vec<String>,
+    /// Unmanaged local *mods* not in the manifest (ask keep/remove), and the
+    /// player's own copy of a pack mod whose pack copy they switched off.
+    /// Packs are never listed here — the player's own resource/shader packs
+    /// are kept silently. Switched-off mods neither: they are never loaded.
     pub user_extras: Vec<String>,
     /// Duplicate-`modId` clashes needing a user decision.
     pub collisions: Vec<Collision>,
@@ -78,6 +110,7 @@ impl UpdatePlan {
         self.downloads.is_empty()
             && self.removals.is_empty()
             && self.duplicates.is_empty()
+            && self.stale_disabled.is_empty()
             && self.collisions.is_empty()
     }
 }
@@ -85,8 +118,25 @@ impl UpdatePlan {
 /// Compute the update plan. Deterministic: the result depends only on the
 /// inputs (never on hash-map iteration order) and all vectors are sorted.
 pub fn compute_plan(manifest: &Manifest, local: &[LocalFile], state: &ClientState) -> UpdatePlan {
-    let local_by_path: BTreeMap<&str, &LocalFile> =
-        local.iter().map(|l| (l.path.as_str(), l)).collect();
+    // The file standing for each switched-on path. A switched-off twin
+    // (`x.jar.disabled` next to `x.jar`) only stands in while the switched-on
+    // file is missing; otherwise it is a leftover.
+    let mut local_by_path: BTreeMap<&str, &LocalFile> = BTreeMap::new();
+    for l in local {
+        local_by_path
+            .entry(l.enabled_path())
+            .and_modify(|cur| {
+                if (l.disabled, &l.path) < (cur.disabled, &cur.path) {
+                    *cur = l;
+                }
+            })
+            .or_insert(l);
+    }
+    let stands_for_path = |l: &LocalFile| {
+        local_by_path
+            .get(l.enabled_path())
+            .is_some_and(|c| c.path == l.path)
+    };
     // Any local file with a given content; the smallest path wins so the
     // choice is stable.
     let mut local_by_sha: BTreeMap<&str, &str> = BTreeMap::new();
@@ -122,10 +172,16 @@ pub fn compute_plan(manifest: &Manifest, local: &[LocalFile], state: &ClientStat
                     .iter()
                     .any(|id| manifest_mod_ids.contains(id.as_str()));
             if by_sha || by_mod {
-                managed.insert(lf.path.clone());
+                managed.insert(lf.enabled_path().to_string());
             }
         }
     }
+
+    // A local file the pack owns: managed, or sitting at a manifest path.
+    let owned = |l: &LocalFile| {
+        stands_for_path(l)
+            && (managed.contains(l.enabled_path()) || manifest_paths.contains(l.enabled_path()))
+    };
 
     // modId -> managed file an incoming version may supersede. Files sitting at
     // a manifest path are excluded: they are owned by their own manifest entry
@@ -152,22 +208,118 @@ pub fn compute_plan(manifest: &Manifest, local: &[LocalFile], state: &ClientStat
         }
     }
 
+    // --- 2. On or off ----------------------------------------------------------
+    // A pack mod goes in switched off only if the player switched off every
+    // copy of it they had: the file at its path, the pack's older versions
+    // (same modId) and identical copies. Whether *which* old copy gets
+    // replaced decides nothing.
+    let all_copies_off = |e: &FileEntry| -> bool {
+        if e.category != Category::Mod {
+            return false;
+        }
+        let mut copies = local
+            .iter()
+            .filter(|l| {
+                let same_mod = e
+                    .mod_id
+                    .as_deref()
+                    .is_some_and(|m| l.mod_ids.iter().any(|id| id == m));
+                // The file at the path counts if it is this mod at all (a
+                // library has nothing but its path to go by).
+                let at_path = stands_for_path(l)
+                    && l.enabled_path() == e.path
+                    && (e.mod_id.is_none() || same_mod || l.sha1 == e.sha1);
+                at_path || (same_mod && owned(l)) || (!l.disabled && l.sha1 == e.sha1)
+            })
+            .peekable();
+        copies.peek().is_some() && copies.all(|l| l.disabled)
+    };
+    let off_before: BTreeMap<&str, bool> = entries
+        .iter()
+        .map(|e| (e.path.as_str(), all_copies_off(e)))
+        .collect();
+
+    // --- 3. Unmanaged local mods: duplicates, collisions, extras, leftovers ---
     let mut plan = UpdatePlan::default();
+    // Every pack modId a colliding copy provides (a jar may declare several).
+    let mut clashing: BTreeSet<&str> = BTreeSet::new();
+    // How many loaded jars declare each modId.
+    let mut active: BTreeMap<&str, usize> = BTreeMap::new();
+    for l in local.iter().filter(|l| !l.disabled) {
+        for id in &l.mod_ids {
+            *active.entry(id.as_str()).or_default() += 1;
+        }
+    }
+    for lf in local {
+        if lf.category != Category::Mod || owned(lf) {
+            continue;
+        }
+        let pack_ids: Vec<&String> = lf
+            .mod_ids
+            .iter()
+            .filter(|id| manifest_mod_ids.contains(id.as_str()))
+            .collect();
+        if lf.disabled {
+            // Never loaded, so never a crash risk: only pack leftovers go.
+            let twin = local_by_path
+                .get(lf.enabled_path())
+                .is_some_and(|c| owned(c));
+            if twin || manifest_shas.contains(lf.sha1.as_str()) || !pack_ids.is_empty() {
+                plan.stale_disabled.push(lf.path.clone());
+            }
+            continue;
+        }
+        // Byte-identical to a pack file but under another name: the pack copy
+        // is (or will be) installed at its own path, so this one is redundant.
+        if manifest_shas.contains(lf.sha1.as_str()) {
+            plan.duplicates.push(lf.path.clone());
+            continue;
+        }
+        // Same modId as a pack mod that stays on: loading both would crash.
+        // If the player switched off every pack copy, their (single) copy
+        // replaces it.
+        let clash = pack_ids.iter().find_map(|mid| {
+            entries
+                .iter()
+                .find(|e| e.category == Category::Mod && e.mod_id.as_deref() == Some(mid.as_str()))
+                .filter(|e| !off_before[e.path.as_str()] || active[mid.as_str()] > 1)
+                .map(|e| (*mid, e.path.clone()))
+        });
+        match clash {
+            Some((mid, manifest_path)) => {
+                clashing.extend(pack_ids.iter().map(|id| id.as_str()));
+                plan.collisions.push(Collision {
+                    local_path: lf.path.clone(),
+                    mod_id: mid.clone(),
+                    manifest_path,
+                });
+            }
+            None => plan.user_extras.push(lf.path.clone()),
+        }
+    }
+    // A colliding copy is replaced by the pack's (by default), so the pack
+    // copies of its mods must be on — they were on before.
+    let goes_in_off = |e: &FileEntry| {
+        off_before[e.path.as_str()] && e.mod_id.as_deref().is_none_or(|m| !clashing.contains(m))
+    };
+
+    // --- 4. Downloads (walk the manifest) -------------------------------------
     let mut replaced: BTreeSet<String> = BTreeSet::new();
     let local_copy_for = |e: &FileEntry| local_by_sha.get(e.sha1.as_str()).map(|p| p.to_string());
-
-    // --- 2. Downloads (walk the manifest) -------------------------------------
     for e in &entries {
+        let off = goes_in_off(e);
         if let Some(lf) = local_by_path.get(e.path.as_str()) {
-            if lf.sha1 == e.sha1 {
+            if lf.sha1 == e.sha1 && lf.disabled == off {
                 managed.insert(e.path.clone()); // up to date; ensure managed
                 continue;
             }
-            // Same path, changed content.
+            // Same path, changed content — or the same content to switch back
+            // on because another active copy of the mod goes away.
             plan.downloads.push(Download {
                 entry: (*e).clone(),
-                replaces: Some(e.path.clone()),
+                replaces: Some(lf.path.clone()),
                 local_copy: local_copy_for(e),
+                disabled: off,
             });
             replaced.insert(e.path.clone());
             continue;
@@ -186,65 +338,38 @@ pub fn compute_plan(manifest: &Manifest, local: &[LocalFile], state: &ClientStat
         }
         plan.downloads.push(Download {
             entry: (*e).clone(),
-            replaces: old,
+            replaces: old.map(|o| real_path(&local_by_path, o)),
             local_copy: local_copy_for(e),
+            disabled: off,
         });
     }
 
-    // --- 3. Removals (managed files gone from the manifest) -------------------
+    // --- 5. Removals (managed files gone from the manifest) -------------------
     for p in &managed {
         if replaced.contains(p) || manifest_paths.contains(p.as_str()) {
             continue;
         }
-        plan.removals.push(p.clone());
+        plan.removals.push(real_path(&local_by_path, p.clone()));
     }
 
-    // --- 4. Unmanaged local mods: duplicates, collisions, extras --------------
-    for lf in local {
-        if lf.category != Category::Mod || managed.contains(&lf.path) {
-            continue;
-        }
-        // A file sitting at a manifest path is managed content (being installed
-        // or updated in step 2), never a user "extra".
-        if manifest_paths.contains(lf.path.as_str()) {
-            continue;
-        }
-        // Byte-identical to a pack file but under another name: the pack copy
-        // is (or will be) installed at its own path, so this one is redundant.
-        if manifest_shas.contains(lf.sha1.as_str()) {
-            plan.duplicates.push(lf.path.clone());
-            continue;
-        }
-        match lf
-            .mod_ids
-            .iter()
-            .find(|id| manifest_mod_ids.contains(id.as_str()))
-        {
-            Some(mid) => {
-                let manifest_path = entries
-                    .iter()
-                    .find(|e| {
-                        e.category == Category::Mod && e.mod_id.as_deref() == Some(mid.as_str())
-                    })
-                    .map(|e| e.path.clone())
-                    .unwrap_or_default();
-                plan.collisions.push(Collision {
-                    local_path: lf.path.clone(),
-                    mod_id: mid.clone(),
-                    manifest_path,
-                });
-            }
-            None => plan.user_extras.push(lf.path.clone()),
-        }
-    }
-
-    // --- 5. Finalise ----------------------------------------------------------
+    // --- 6. Finalise ----------------------------------------------------------
     plan.adopted = managed.difference(&original_managed).cloned().collect();
+    plan.removals.sort();
     plan.duplicates.sort();
+    plan.stale_disabled.sort();
     plan.user_extras.sort();
     plan.collisions
         .sort_by(|a, b| a.local_path.cmp(&b.local_path));
     plan
+}
+
+/// The real file name behind a switched-on path (`mods/x.jar.disabled` while
+/// switched off); the path itself if nothing is there.
+fn real_path(local_by_path: &BTreeMap<&str, &LocalFile>, path: String) -> String {
+    match local_by_path.get(path.as_str()) {
+        Some(l) => l.path.clone(),
+        None => path,
+    }
 }
 
 /// How well an instance matches the pack — to catch updating the wrong
@@ -253,7 +378,7 @@ pub fn compute_plan(manifest: &Manifest, local: &[LocalFile], state: &ClientStat
 #[serde(rename_all = "camelCase")]
 pub struct InstanceAssessment {
     pub first_run: bool,
-    /// Jars in `mods/`.
+    /// Jars in `mods/` (switched-off ones included).
     pub local_mods: usize,
     /// Of those, how many belong to the pack (same content or same modId).
     pub pack_mods: usize,
@@ -333,7 +458,15 @@ mod tests {
             mod_ids: mod_ids.iter().map(|s| s.to_string()).collect(),
             mod_version: None,
             mod_name: None,
+            disabled: false,
         }
+    }
+
+    /// A switched-off mod: `path` is the switched-on name.
+    fn lf_off(path: &str, sha1: &str, mod_ids: &[&str]) -> LocalFile {
+        let mut l = lf(Category::Mod, &format!("{path}.disabled"), sha1, mod_ids);
+        l.disabled = true;
+        l
     }
 
     fn manifest(files: Vec<FileEntry>) -> Manifest {
@@ -768,6 +901,206 @@ mod tests {
         assert!(!assess_instance(&man, &[], &st).suspicious);
     }
 
+    // --- switched-off mods (`.jar.disabled`) -------------------------------------
+
+    #[test]
+    fn switched_off_mod_that_is_up_to_date_is_left_alone() {
+        let man = manifest(vec![fe(Category::Mod, "mods/a.jar", "s1", Some("a"))]);
+        let local = vec![lf_off("mods/a.jar", "s1", &["a"])];
+        let st = state(&[("mods/a.jar", "s1", &["a"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert!(plan.is_noop(), "{plan:?}");
+        assert!(plan.user_extras.is_empty() && plan.stale_disabled.is_empty());
+    }
+
+    #[test]
+    fn new_version_of_a_switched_off_mod_stays_off() {
+        let man = manifest(vec![fe(
+            Category::Mod,
+            "mods/create-2.jar",
+            "NEW",
+            Some("create"),
+        )]);
+        let local = vec![lf_off("mods/create-1.jar", "OLD", &["create"])];
+        let st = state(&[("mods/create-1.jar", "OLD", &["create"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert_eq!(plan.downloads.len(), 1, "{plan:?}");
+        let d = &plan.downloads[0];
+        assert!(d.disabled);
+        assert_eq!(d.target(), "mods/create-2.jar.disabled");
+        assert_eq!(d.replaces.as_deref(), Some("mods/create-1.jar.disabled"));
+        assert!(plan.removals.is_empty());
+    }
+
+    #[test]
+    fn changed_content_of_a_switched_off_mod_stays_off() {
+        let man = manifest(vec![fe(Category::Mod, "mods/a.jar", "NEW", Some("a"))]);
+        let local = vec![lf_off("mods/a.jar", "OLD", &["a"])];
+        let st = state(&[("mods/a.jar", "OLD", &["a"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert_eq!(plan.downloads.len(), 1);
+        assert!(plan.downloads[0].disabled);
+        assert_eq!(
+            plan.downloads[0].replaces.as_deref(),
+            Some("mods/a.jar.disabled")
+        );
+    }
+
+    #[test]
+    fn switched_off_mod_dropped_by_the_pack_is_removed_by_its_real_name() {
+        let man = manifest(vec![]);
+        let local = vec![lf_off("mods/gone.jar", "s1", &["gone"])];
+        let st = state(&[("mods/gone.jar", "s1", &["gone"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert_eq!(plan.removals, vec!["mods/gone.jar.disabled".to_string()]);
+    }
+
+    #[test]
+    fn new_version_is_on_if_any_old_copy_was_on() {
+        // Two old copies of one mod; which of them gets "replaced" must not
+        // decide whether the new version is on.
+        let man = manifest(vec![fe(Category::Mod, "mods/x-3.jar", "NEW", Some("x"))]);
+        let local = vec![
+            lf_off("mods/x-1.jar", "OLD1", &["x"]),
+            lf(Category::Mod, "mods/x-2.jar", "OLD2", &["x"]),
+        ];
+        let st = state(&[
+            ("mods/x-1.jar", "OLD1", &["x"]),
+            ("mods/x-2.jar", "OLD2", &["x"]),
+        ]);
+        let plan = compute_plan(&man, &local, &st);
+        assert_eq!(plan.downloads.len(), 1);
+        assert!(!plan.downloads[0].disabled, "{plan:?}");
+        let mut gone: Vec<&str> = plan
+            .removals
+            .iter()
+            .map(String::as_str)
+            .chain(plan.downloads[0].replaces.as_deref())
+            .collect();
+        gone.sort();
+        assert_eq!(gone, vec!["mods/x-1.jar.disabled", "mods/x-2.jar"]);
+    }
+
+    #[test]
+    fn leftovers_from_older_versions_are_cleaned_up() {
+        // An older Bonegrader did not see `x-1.jar.disabled` and installed the
+        // pack's x again: the switched-off old copy is a leftover now.
+        let man = manifest(vec![
+            fe(Category::Mod, "mods/x-2.jar", "X2", Some("x")),
+            fe(Category::Mod, "mods/y.jar", "Y", Some("y")),
+        ]);
+        let local = vec![
+            lf_off("mods/x-1.jar", "X1", &["x"]),
+            lf(Category::Mod, "mods/x-2.jar", "X2", &["x"]),
+            // Same path, both on and off: the switched-off twin is a leftover.
+            lf(Category::Mod, "mods/y.jar", "Y", &["y"]),
+            lf_off("mods/y.jar", "Y", &["y"]),
+        ];
+        let st = state(&[("mods/x-2.jar", "X2", &["x"]), ("mods/y.jar", "Y", &["y"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert!(plan.downloads.is_empty(), "{plan:?}");
+        assert_eq!(
+            plan.stale_disabled,
+            vec![
+                "mods/x-1.jar.disabled".to_string(),
+                "mods/y.jar.disabled".into()
+            ]
+        );
+        assert!(!plan.is_noop());
+    }
+
+    #[test]
+    fn own_switched_off_mods_are_left_alone() {
+        let man = manifest(vec![fe(Category::Mod, "mods/a.jar", "s1", Some("a"))]);
+        let local = vec![
+            lf(Category::Mod, "mods/a.jar", "s1", &["a"]),
+            lf_off("mods/mine.jar", "M", &["mine"]),
+        ];
+        let st = state(&[("mods/a.jar", "s1", &["a"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert!(plan.is_noop(), "{plan:?}");
+        assert!(plan.user_extras.is_empty() && plan.stale_disabled.is_empty());
+    }
+
+    #[test]
+    fn own_copy_replacing_a_switched_off_pack_mod_is_not_a_collision() {
+        // The player switched off the pack's JEI and runs their own version.
+        let man = manifest(vec![fe(
+            Category::Mod,
+            "mods/jei-19.5.jar",
+            "PACK",
+            Some("jei"),
+        )]);
+        let local = vec![
+            lf_off("mods/jei-19.5.jar", "PACK", &["jei"]),
+            lf(Category::Mod, "mods/jei-20.0.jar", "MINE", &["jei"]),
+        ];
+        let st = state(&[("mods/jei-19.5.jar", "PACK", &["jei"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert!(plan.is_noop(), "{plan:?}");
+        assert_eq!(plan.user_extras, vec!["mods/jei-20.0.jar".to_string()]);
+    }
+
+    #[test]
+    fn colliding_own_copy_switches_the_pack_copy_back_on() {
+        // Two own copies of a pack mod are loaded at once (a crash already),
+        // so they are collisions and the pack copy goes back on.
+        let man = manifest(vec![fe(Category::Mod, "mods/jei.jar", "PACK", Some("jei"))]);
+        let local = vec![
+            lf_off("mods/jei.jar", "PACK", &["jei"]),
+            lf(Category::Mod, "mods/jei-a.jar", "A", &["jei"]),
+            lf(Category::Mod, "mods/jei-b.jar", "B", &["jei"]),
+        ];
+        let st = state(&[("mods/jei.jar", "PACK", &["jei"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert_eq!(plan.collisions.len(), 2, "{plan:?}");
+        assert_eq!(plan.downloads.len(), 1);
+        let d = &plan.downloads[0];
+        assert!(!d.disabled);
+        assert_eq!(d.replaces.as_deref(), Some("mods/jei.jar.disabled"));
+        assert_eq!(
+            d.local_copy.as_deref(),
+            Some("mods/jei.jar.disabled"),
+            "no download needed"
+        );
+    }
+
+    #[test]
+    fn active_identical_copy_keeps_a_switched_off_pack_mod_on() {
+        // `jei (1).jar` is on, the pack's copy off: removing the duplicate
+        // must not switch JEI off.
+        let man = manifest(vec![fe(Category::Mod, "mods/jei.jar", "J", Some("jei"))]);
+        let local = vec![
+            lf_off("mods/jei.jar", "J", &["jei"]),
+            lf(Category::Mod, "mods/jei (1).jar", "J", &["jei"]),
+        ];
+        let st = state(&[("mods/jei.jar", "J", &["jei"])]);
+        let plan = compute_plan(&man, &local, &st);
+        assert_eq!(plan.duplicates, vec!["mods/jei (1).jar".to_string()]);
+        assert_eq!(plan.downloads.len(), 1);
+        assert_eq!(plan.downloads[0].target(), "mods/jei.jar");
+    }
+
+    #[test]
+    fn first_run_keeps_switched_off_pack_mods_off() {
+        // A CurseForge instance where the player switched off a pack mod
+        // before ever using Bonegrader.
+        let man = manifest(vec![
+            fe(Category::Mod, "mods/a.jar", "A", Some("a")),
+            fe(Category::Mod, "mods/xaero-2.jar", "X2", Some("xaero")),
+        ]);
+        let local = vec![
+            lf(Category::Mod, "mods/a.jar", "A", &["a"]),
+            lf_off("mods/xaero-1.jar", "X1", &["xaero"]),
+        ];
+        let plan = compute_plan(&man, &local, &ClientState::default());
+        assert_eq!(plan.downloads.len(), 1, "{plan:?}");
+        let d = &plan.downloads[0];
+        assert_eq!(d.target(), "mods/xaero-2.jar.disabled");
+        assert_eq!(d.replaces.as_deref(), Some("mods/xaero-1.jar.disabled"));
+        assert!(plan.stale_disabled.is_empty() && plan.user_extras.is_empty());
+    }
+
     // --- property test: simulate apply on a model filesystem ---------------------
 
     mod model {
@@ -789,8 +1122,9 @@ mod tests {
             // Manifest: up to 4 mods on distinct paths with distinct contents.
             let manifest_files =
                 proptest::collection::btree_map(0usize..6, (0usize..4, any::<bool>()), 0..5);
+            // Keyed by (path, switched off): both twins of a path may exist.
             let local_files = proptest::collection::btree_map(
-                0usize..8,
+                (0usize..8, any::<bool>()),
                 (0usize..8, proptest::collection::btree_set(0usize..4, 0..3)),
                 0..6,
             );
@@ -823,21 +1157,23 @@ mod tests {
                     };
                     let local: Vec<LocalFile> = lc
                         .into_iter()
-                        .map(|(pidx, (content, ids))| {
+                        .map(|((pidx, disabled), (content, ids))| {
                             let sha1 = format!("c{content}");
                             let ids = content_ids(
                                 &sha1,
                                 ids.into_iter().map(|i| IDS[i].to_string()).collect(),
                             );
+                            let suffix = if disabled { ".disabled" } else { "" };
                             LocalFile {
                                 category: Category::Mod,
-                                path: format!("mods/p{pidx}.jar"),
-                                file_name: format!("p{pidx}.jar"),
+                                path: format!("mods/p{pidx}.jar{suffix}"),
+                                file_name: format!("p{pidx}.jar{suffix}"),
                                 size: 1,
                                 sha1,
                                 mod_ids: ids,
                                 mod_version: None,
                                 mod_name: None,
+                                disabled,
                             }
                         })
                         .collect();
@@ -845,7 +1181,12 @@ mod tests {
                     if !first_run {
                         for pidx in mg {
                             let path = format!("mods/p{pidx}.jar");
-                            let (sha1, mod_ids) = match local.iter().find(|l| l.path == path) {
+                            // The switched-on twin stands for the path if both exist.
+                            let at_path = local
+                                .iter()
+                                .filter(|l| l.enabled_path() == path)
+                                .min_by_key(|l| l.disabled);
+                            let (sha1, mod_ids) = match at_path {
                                 Some(l) => (l.sha1.clone(), l.mod_ids.clone()),
                                 None => ("gone".into(), vec![IDS[pidx % 4].to_string()]),
                             };
@@ -873,6 +1214,7 @@ mod tests {
                 .removals
                 .iter()
                 .chain(&plan.duplicates)
+                .chain(&plan.stale_disabled)
                 .chain(plan.collisions.iter().map(|c| &c.local_path));
             for p in deletions {
                 disk.remove(p);
@@ -881,23 +1223,25 @@ mod tests {
                 if let Some(r) = &d.replaces {
                     disk.remove(r);
                 }
+                let target = d.target();
                 disk.insert(
-                    d.entry.path.clone(),
+                    target.clone(),
                     LocalFile {
                         category: d.entry.category,
-                        path: d.entry.path.clone(),
-                        file_name: d.entry.file_name.clone(),
+                        file_name: target.rsplit('/').next().unwrap().to_string(),
+                        path: target,
                         size: d.entry.size,
                         sha1: d.entry.sha1.clone(),
                         mod_ids: d.entry.mod_id.clone().into_iter().collect(),
                         mod_version: None,
                         mod_name: None,
+                        disabled: d.disabled,
                     },
                 );
             }
             let mut st = ClientState::default();
             for e in &c.manifest.files {
-                if disk.contains_key(&e.path) {
+                if disk.contains_key(&e.path) || disk.contains_key(&disabled_path(&e.path)) {
                     st.managed.insert(
                         e.path.clone(),
                         ManagedEntry {
@@ -919,25 +1263,60 @@ mod tests {
 
                 // Structural sanity: each old file is replaced at most once, and
                 // never one that another download writes to.
-                let targets: BTreeSet<&str> = plan.downloads.iter().map(|d| d.entry.path.as_str()).collect();
+                let targets: BTreeSet<String> = plan.downloads.iter().map(Download::target).collect();
                 let mut seen = BTreeSet::new();
                 for d in &plan.downloads {
                     if let Some(r) = &d.replaces {
                         prop_assert!(seen.insert(r.clone()), "replaced twice: {r} in {plan:?}");
-                        prop_assert!(r == &d.entry.path || !targets.contains(r.as_str()), "{plan:?}");
+                        prop_assert!(r == &d.target() || !targets.contains(r), "{plan:?}");
                     }
                 }
 
                 let (disk, st) = simulate(&c, &plan);
+                let active = |disk: &BTreeMap<String, LocalFile>, id: &str| {
+                    disk.values()
+                        .filter(|l| !l.disabled && l.mod_ids.iter().any(|x| x == id))
+                        .count()
+                };
 
-                // Every pack file is present with the right content.
+                // Every pack file is present once — on or off — with the right
+                // content.
                 for e in &c.manifest.files {
-                    prop_assert_eq!(disk.get(&e.path).map(|l| l.sha1.as_str()), Some(e.sha1.as_str()), "{:?}", plan);
+                    let on = disk.get(&e.path).map(|l| l.sha1.as_str());
+                    let off = disk.get(&disabled_path(&e.path)).map(|l| l.sha1.as_str());
+                    prop_assert!(on.is_none() || off.is_none(), "both twins of {}: {:?}", e.path, plan);
+                    prop_assert_eq!(on.or(off), Some(e.sha1.as_str()), "{:?}", plan);
                 }
-                // No pack modId is loaded twice (the game would crash).
                 for id in c.manifest.mods().filter_map(|f| f.mod_id.as_deref()) {
-                    let n = disk.values().filter(|l| l.mod_ids.iter().any(|x| x == id)).count();
-                    prop_assert_eq!(n, 1, "modId {} present {} times; plan {:?}", id, n, plan);
+                    // No pack modId is loaded twice (the game would crash).
+                    let n = active(&disk, id);
+                    prop_assert!(n <= 1, "modId {} active {} times; plan {:?}", id, n, plan);
+                    // An update never switches a mod off …
+                    let before = c.local.iter().any(|l| !l.disabled && l.mod_ids.iter().any(|x| x == id));
+                    prop_assert!(!before || n == 1, "modId {} switched off; plan {:?}", id, plan);
+                    // … nor back on, if the player switched off every pack copy.
+                    let pack_owned = |l: &LocalFile| {
+                        let p = l.enabled_path();
+                        let stands = !l.disabled || !c.local.iter().any(|o| !o.disabled && o.enabled_path() == p);
+                        let adoptable = c.state.is_first_run()
+                            && (c.manifest.files.iter().any(|f| f.sha1 == l.sha1)
+                                || l.mod_ids.iter().any(|x| c.manifest.mods().any(|f| f.mod_id.as_deref() == Some(x.as_str()))));
+                        stands && (c.state.managed.contains_key(p) || c.manifest.files.iter().any(|f| f.path == p) || adoptable)
+                    };
+                    let switched_off = c.local.iter().any(|l| l.disabled && pack_owned(l) && l.mod_ids.iter().any(|x| x == id));
+                    prop_assert!(before || !switched_off || n == 0, "modId {} switched on; plan {:?}", id, plan);
+                }
+                // A switched-off copy of a pack file at its own path (by modId,
+                // content, or — for libraries — by name) is only replaced by a
+                // switched-on one if another active copy of the mod goes.
+                for d in &plan.downloads {
+                    let e = &d.entry;
+                    let same = |l: &LocalFile| l.sha1 == e.sha1 || e.mod_id.as_ref().is_some_and(|m| l.mod_ids.contains(m));
+                    let Some(old) = d.replaces.as_ref().and_then(|r| c.local.iter().find(|l| &l.path == r)) else { continue };
+                    if old.disabled && old.enabled_path() == e.path && (e.mod_id.is_none() || same(old)) {
+                        let other_active = c.local.iter().any(|l| !l.disabled && same(l));
+                        prop_assert!(d.disabled || other_active, "{} switched on without reason: {plan:?}", old.path);
+                    }
                 }
                 // The player's own extras survive untouched.
                 for p in &plan.user_extras {

@@ -173,7 +173,15 @@ pub fn local(path: &str, content: &[u8], mod_ids: &[&str]) -> LocalFile {
         mod_ids: mod_ids.iter().map(|s| s.to_string()).collect(),
         mod_version: None,
         mod_name: None,
+        disabled: false,
     }
+}
+
+/// A switched-off mod: `path` is the switched-on name.
+pub fn local_off(path: &str, content: &[u8], mod_ids: &[&str]) -> LocalFile {
+    let mut l = local(&format!("{path}.disabled"), content, mod_ids);
+    l.disabled = true;
+    l
 }
 
 /// An in-memory mod jar declaring one mod with a version and display name.

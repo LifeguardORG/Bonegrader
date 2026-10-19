@@ -15,7 +15,7 @@ use bonegrader_core::hash::sha1_bytes;
 use bonegrader_core::manifest::{
     ClientInfo, Loader, Manifest, ManifestError, SeedEntry, ServerInfo, SCHEMA_VERSION,
 };
-use bonegrader_core::scan::{scan_instance_cached, LocalFile, ScanCache};
+use bonegrader_core::scan::{scan_instance_cached, DisabledMods, LocalFile, ScanCache};
 use bonegrader_core::sign::{parse_public_keys, verify_any, PublicKey, SIGNATURE_FILE};
 use bonegrader_core::state::ClientState;
 use bonegrader_core::version::is_older;
@@ -299,8 +299,13 @@ impl Updater<'_> {
         let fetched = fetch_manifest(self.fetcher, self.base_url, self.keys)?;
         let state = load_state(self.instance)?;
         let mut cache = load_cache(self.instance);
-        let local = scan_instance_cached(self.instance, &crate::CATEGORIES, &mut cache)
-            .context("Instanz einlesen")?;
+        let local = scan_instance_cached(
+            self.instance,
+            &crate::CATEGORIES,
+            DisabledMods::Include,
+            &mut cache,
+        )
+        .context("Instanz einlesen")?;
         save_cache(self.instance, &cache);
 
         let m = &fetched.manifest;
@@ -411,6 +416,7 @@ fn local_meta(plan: &UpdatePlan, local: &[LocalFile]) -> BTreeMap<String, LocalM
         .filter_map(|d| d.replaces.as_deref())
         .chain(plan.removals.iter().map(String::as_str))
         .chain(plan.duplicates.iter().map(String::as_str))
+        .chain(plan.stale_disabled.iter().map(String::as_str))
         .chain(plan.user_extras.iter().map(String::as_str))
         .chain(plan.collisions.iter().map(|c| c.local_path.as_str()))
         // The pack's copy in a collision, when it is installed already.

@@ -6,7 +6,7 @@
 //! it, and clients refuse manifests newer than they understand (instead of
 //! silently misreading them).
 
-use crate::paths::{is_safe_managed_path, is_safe_seed_path, path_matches_category};
+use crate::paths::{is_mod_jar, is_safe_managed_path, is_safe_seed_path, path_matches_category};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -168,6 +168,11 @@ impl Manifest {
             }
             if !path_matches_category(&f.path, f.category) {
                 return Err(ManifestError::CategoryMismatch(f.path.clone()));
+            }
+            // Mods must be loadable jars: a `.jar.disabled` entry would blur
+            // the line between a pack file and a mod the player switched off.
+            if f.category == Category::Mod && !is_mod_jar(&f.path) {
+                return Err(ManifestError::BadPath(f.path.clone()));
             }
             if f.path.rsplit('/').next() != Some(f.file_name.as_str()) {
                 return Err(ManifestError::FileNameMismatch(f.path.clone()));
@@ -335,6 +340,14 @@ mod tests {
             bad_path.validate(),
             Err(ManifestError::BadPath(_))
         ));
+
+        for name in ["mods/a.jar.disabled", "mods/a.zip"] {
+            let not_a_jar = manifest(vec![entry(Category::Mod, name, SHA_A)]);
+            assert!(
+                matches!(not_a_jar.validate(), Err(ManifestError::BadPath(_))),
+                "{name}"
+            );
+        }
 
         let wrong_dir = manifest(vec![entry(Category::Mod, "shaderpacks/a.zip", SHA_A)]);
         assert!(matches!(

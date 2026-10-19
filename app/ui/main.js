@@ -694,7 +694,7 @@ async function createInstance() {
 
 // --- step 3: plan ----------------------------------------------------------------
 
-const prettyFile = (name) => String(name).replace(/\.(jar|zip)$/i, "");
+const prettyFile = (name) => String(name).replace(/\.(jar|zip)(\.disabled)?$/i, "");
 const CATEGORY_NOTES = { resourcepack: "Ressourcenpaket", shaderpack: "Shader" };
 
 /** One line of the change list. */
@@ -781,7 +781,7 @@ function renderPlan(view) {
 
   const installs = plan.downloads.filter((d) => !d.replaces);
   const updates = plan.downloads.filter((d) => d.replaces);
-  const removed = plan.removals.length + plan.duplicates.length;
+  const removed = plan.removals.length + plan.duplicates.length + plan.staleDisabled.length;
   const stand = view.generatedAt ? ` · Server-Stand vom ${formatWhen(view.generatedAt)}` : "";
 
   if (view.noop) {
@@ -810,6 +810,7 @@ function renderPlan(view) {
   const rowFor = new Map();
   const dlRow = (d, tagClass, tagText) => {
     const r = entryRow(tagClass, tagText, d.entry, d.replaces ? local[d.replaces]?.version : null);
+    if (d.disabled) r.querySelector(".what").append(h("div", { class: "file" }, "bleibt deaktiviert"));
     rowFor.set(d.entry.path, r);
     return r;
   };
@@ -846,6 +847,9 @@ function renderPlan(view) {
   }));
   groups.push(group("Doppelt", plan.duplicates.map((p) => localRow("rem", "doppelt", p, local)), {
     note: "Identische Kopien (z. B. „jei (1).jar“) – zwei gleiche Mods würden das Spiel abstürzen lassen.",
+  }));
+  groups.push(group("Alte deaktivierte Kopien", plan.staleDisabled.map((p) => localRow("rem", "aufräumen", p, local)), {
+    note: "Ausgeschaltete Reste von Pack-Mods (z. B. eine alte Version) – Minecraft lädt sie nicht, sie landen im Backup.",
   }));
   groups.push(group("Standard-Einstellungen", view.seeds.map((p) => row("add", "neu", { title: p })), {
     note: "Werden nur angelegt, weil sie bei dir fehlen – deine eigenen Einstellungen bleiben.",

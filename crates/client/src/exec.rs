@@ -19,8 +19,8 @@ pub struct Decisions {
 pub struct ExecutionPlan {
     /// Files to download (each may carry a `replaces` path handled at apply time).
     pub downloads: Vec<Download>,
-    /// Files to back up and remove (removals, duplicates, resolved collisions,
-    /// chosen extras).
+    /// Files to back up and remove (removals, duplicates, switched-off
+    /// leftovers, resolved collisions, chosen extras).
     pub deletions: Vec<String>,
     /// Seed files to create if (still) missing; never overwrite anything.
     pub seeds: Vec<SeedEntry>,
@@ -60,6 +60,7 @@ pub fn finalize(plan: &UpdatePlan, decisions: &Decisions) -> ExecutionPlan {
 
     deletions.extend(plan.removals.iter().cloned());
     deletions.extend(plan.duplicates.iter().cloned());
+    deletions.extend(plan.stale_disabled.iter().cloned());
     for c in &plan.collisions {
         if !decisions.keep_collision_local.contains(&c.local_path) {
             deletions.insert(c.local_path.clone());
@@ -101,6 +102,7 @@ mod tests {
             },
             replaces: replaces.map(str::to_string),
             local_copy: None,
+            disabled: false,
         }
     }
 
@@ -118,6 +120,7 @@ mod tests {
             downloads: vec![dl("mods/jei-19.5.jar", None)],
             removals: vec!["mods/gone.jar".into()],
             duplicates: vec!["mods/a (1).jar".into()],
+            stale_disabled: vec!["mods/b-old.jar.disabled".into()],
             user_extras: vec!["mods/mine.jar".into()],
             collisions: vec![jei_collision()],
             adopted: vec![],
@@ -129,6 +132,7 @@ mod tests {
             exec.deletions,
             vec![
                 "mods/a (1).jar".to_string(),
+                "mods/b-old.jar.disabled".into(),
                 "mods/gone.jar".into(),
                 "mods/jei-old.jar".into()
             ]

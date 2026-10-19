@@ -10,7 +10,7 @@
 use crate::hash::sha1_file;
 use crate::manifest::Category;
 use crate::modinfo::read_mod_info;
-use crate::paths::category_dir;
+use crate::paths::{category_dir, enabled_path, DISABLED_SUFFIX};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::Metadata;
@@ -31,6 +31,26 @@ pub struct LocalFile {
     pub mod_version: Option<String>,
     /// The primary mod's display name, if the jar declares one.
     pub mod_name: Option<String>,
+    /// Switched off with the launchers' `.disabled` suffix; `path` is then the
+    /// real name (`mods/x.jar.disabled`), see [`LocalFile::enabled_path`].
+    pub disabled: bool,
+}
+
+impl LocalFile {
+    /// The path the file has while switched on (`mods/x.jar` for
+    /// `mods/x.jar.disabled`) — what manifest paths and the client state use.
+    pub fn enabled_path(&self) -> &str {
+        enabled_path(&self.path).unwrap_or(&self.path)
+    }
+}
+
+/// Whether a scan also reads switched-off mods (`*.jar.disabled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisabledMods {
+    /// Only what the game loads (what a pack is built from).
+    Skip,
+    /// Also the mods the player switched off (what the client manages).
+    Include,
 }
 
 /// Bumped whenever [`CachedFile`] gains data older entries lack, so they are
@@ -70,9 +90,15 @@ pub struct CachedFile {
     pub mod_name: Option<String>,
 }
 
-/// Scan the given categories under `instance_dir` without a cache.
+/// Scan the given categories under `instance_dir` without a cache. Mods
+/// switched off (`*.jar.disabled`) are skipped.
 pub fn scan_instance(instance_dir: &Path, categories: &[Category]) -> io::Result<Vec<LocalFile>> {
-    scan_instance_cached(instance_dir, categories, &mut ScanCache::default())
+    scan_instance_cached(
+        instance_dir,
+        categories,
+        DisabledMods::Skip,
+        &mut ScanCache::default(),
+    )
 }
 
 /// Scan the given categories under `instance_dir`. Missing folders are skipped;
@@ -80,12 +106,13 @@ pub fn scan_instance(instance_dir: &Path, categories: &[Category]) -> io::Result
 /// files that disappeared from a scanned folder are dropped.
 ///
 /// Only files that can actually be managed are returned: `.jar` for mods,
-/// `.zip` for resource/shader packs. Disabled files (`*.jar.disabled`,
-/// `*.zip.txt`) are intentionally ignored so the player's disable choices are
-/// respected. I/O errors name the file they concern.
+/// `.zip` for resource/shader packs, and — with [`DisabledMods::Include`] —
+/// switched-off mods (`*.jar.disabled`). Switched-off packs (`*.zip.txt`) are
+/// never returned. I/O errors name the file they concern.
 pub fn scan_instance_cached(
     instance_dir: &Path,
     categories: &[Category],
+    disabled_mods: DisabledMods,
     cache: &mut ScanCache,
 ) -> io::Result<Vec<LocalFile>> {
     if cache.version != CACHE_VERSION {
@@ -108,9 +135,9 @@ pub fn scan_instance_cached(
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            if !is_relevant(cat, &file_name) {
+            let Some(disabled) = relevance(cat, &file_name, disabled_mods) else {
                 continue;
-            }
+            };
             let rel = format!("{}/{}", category_dir(cat), file_name);
             let meta = std::fs::metadata(&p).map_err(|e| with_path(e, &p))?;
             let fp = fingerprint(&meta);
@@ -152,6 +179,7 @@ pub fn scan_instance_cached(
                 mod_ids,
                 mod_version,
                 mod_name,
+                disabled,
             });
         }
     }
@@ -166,11 +194,19 @@ pub fn scan_instance_cached(
     Ok(out)
 }
 
-fn is_relevant(cat: Category, name: &str) -> bool {
+/// `Some(disabled)` for a file the scan returns, `None` for one it skips.
+fn relevance(cat: Category, name: &str, disabled_mods: DisabledMods) -> Option<bool> {
     let lower = name.to_ascii_lowercase();
     match cat {
-        Category::Mod => lower.ends_with(".jar"),
-        Category::Resourcepack | Category::Shaderpack => lower.ends_with(".zip"),
+        Category::Mod if lower.ends_with(".jar") => Some(false),
+        Category::Mod
+            if disabled_mods == DisabledMods::Include
+                && lower.ends_with(&format!(".jar{DISABLED_SUFFIX}")) =>
+        {
+            Some(true)
+        }
+        Category::Resourcepack | Category::Shaderpack if lower.ends_with(".zip") => Some(false),
+        _ => None,
     }
 }
 
@@ -257,6 +293,42 @@ mod tests {
         assert_eq!(c.sha1, sha1_bytes(&create));
         assert_eq!(c.size, create.len() as u64);
         assert!(found[1].mod_ids.is_empty(), "library jar without metadata");
+        assert!(found.iter().all(|f| !f.disabled));
+        let _ = std::fs::remove_dir_all(&inst);
+    }
+
+    #[test]
+    fn switched_off_mods_are_read_only_on_request() {
+        let inst = tmp("disabled");
+        let jei = jar(&[(
+            "META-INF/neoforge.mods.toml",
+            "[[mods]]\nmodId=\"jei\"\nversion=\"19.5\"\n",
+        )]);
+        write(&inst.join("mods/jei.jar.disabled"), &jei);
+        write(&inst.join("mods/On.JAR.DISABLED"), b"upper case");
+        write(&inst.join("mods/a.jar"), b"A");
+        write(&inst.join("mods/x.zip.disabled"), b"not a mod");
+        write(&inst.join("resourcepacks/pack.zip.disabled"), b"not a pack");
+
+        let mut cache = ScanCache::default();
+        let found = scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut cache).unwrap();
+        let got: Vec<(&str, &str, bool)> = found
+            .iter()
+            .map(|f| (f.path.as_str(), f.enabled_path(), f.disabled))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("mods/On.JAR.DISABLED", "mods/On.JAR", true),
+                ("mods/a.jar", "mods/a.jar", false),
+                ("mods/jei.jar.disabled", "mods/jei.jar", true),
+            ]
+        );
+        assert_eq!(found[2].mod_ids, vec!["jei".to_string()]);
+        assert_eq!(found[2].file_name, "jei.jar.disabled");
+
+        let skipped = scan_instance(&inst, &ALL).unwrap();
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
         let _ = std::fs::remove_dir_all(&inst);
     }
 
@@ -265,17 +337,17 @@ mod tests {
         let inst = tmp("cache");
         write(&inst.join("mods/a.jar"), b"AAAA");
         let mut cache = ScanCache::default();
-        let first = scan_instance_cached(&inst, &ALL, &mut cache).unwrap();
+        let first = scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut cache).unwrap();
         assert_eq!(first[0].sha1, sha1_bytes(b"AAAA"));
 
         // Poison the cached hash: an unchanged file must be served from cache.
         cache.entries.get_mut("mods/a.jar").unwrap().sha1 = "from-cache".into();
-        let second = scan_instance_cached(&inst, &ALL, &mut cache).unwrap();
+        let second = scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut cache).unwrap();
         assert_eq!(second[0].sha1, "from-cache");
 
         // A changed file (size differs) is re-hashed.
         write(&inst.join("mods/a.jar"), b"BBBBBB");
-        let third = scan_instance_cached(&inst, &ALL, &mut cache).unwrap();
+        let third = scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut cache).unwrap();
         assert_eq!(third[0].sha1, sha1_bytes(b"BBBBBB"));
 
         // Vanished files leave the cache; other categories' entries stay.
@@ -290,7 +362,7 @@ mod tests {
             },
         );
         std::fs::remove_file(inst.join("mods/a.jar")).unwrap();
-        scan_instance_cached(&inst, &[Category::Mod], &mut cache).unwrap();
+        scan_instance_cached(&inst, &[Category::Mod], DisabledMods::Include, &mut cache).unwrap();
         assert!(!cache.entries.contains_key("mods/a.jar"));
         assert!(cache.entries.contains_key("shaderpacks/x.zip"));
         let _ = std::fs::remove_dir_all(&inst);
@@ -301,7 +373,7 @@ mod tests {
         let inst = tmp("cache-version");
         write(&inst.join("mods/a.jar"), b"AAAA");
         let mut cache = ScanCache::default();
-        scan_instance_cached(&inst, &ALL, &mut cache).unwrap();
+        scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut cache).unwrap();
         cache.entries.get_mut("mods/a.jar").unwrap().sha1 = "stale".into();
 
         // A cache written before display names existed has no version field.
@@ -309,7 +381,7 @@ mod tests {
         json.as_object_mut().unwrap().remove("version");
         let mut old: ScanCache = serde_json::from_value(json).unwrap();
         assert_eq!(old.version, 0);
-        let found = scan_instance_cached(&inst, &ALL, &mut old).unwrap();
+        let found = scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut old).unwrap();
         assert_eq!(
             found[0].sha1,
             sha1_bytes(b"AAAA"),
