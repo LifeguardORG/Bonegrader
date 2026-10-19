@@ -35,7 +35,9 @@ kein Dateien-Verschieben mehr.
 - Mods, die du im Launcher deaktiviert hast (CurseForge, Prism & Co. benennen
   sie in `….jar.disabled` um), bleiben deaktiviert: Neue Versionen davon werden
   gleich deaktiviert installiert, auch „rückgängig“ ändert daran nichts. Alte,
-  deaktivierte Reste von Pack-Mods räumt Bonegrader ins Backup.
+  deaktivierte Reste von Pack-Mods räumt Bonegrader ins Backup. Braucht ein
+  eingeschalteter Mod einen deaktivierten (z. B. eine Bibliothek), warnt
+  Bonegrader beim Prüfen: So würde Minecraft nicht starten.
 - Ersetzte/entfernte Dateien landen in `.bonegrader-backup/` („Backup-Ordner
   öffnen“); **„Update vom … rückgängig“** stellt den vorherigen Stand wieder her.
 - Fehlt NeoForge (offizieller Launcher), richtet Bonegrader es auf Knopfdruck
@@ -116,7 +118,10 @@ deploy/deploy.sh ./dist/main deploy@<server> /srv/bonegrader main
 die Spieler-App zeigt das an (Pflicht-Mods lassen sich abschalten, dann kommt
 man aber nicht auf den Server). Woher die Markierung kommt: eigene Wahl vor der
 Markierung des letzten Stands vor dem Vorschlag des Servers; ohne alles gilt
-ein Mod als Pflicht. Den Vorschlag liefert der Server-Mod `bonegraderexport`
+ein Mod als Pflicht. Was ein vorgeschlagener Pflicht-Mod zum Laden braucht
+(Bibliotheken wie Cloth Config, auch per Jar-in-Jar mitgelieferte), wird mit
+vorgeschlagen; ist so eine Abhängigkeit optional markiert, warnen Publisher
+und Admin-App. Den Vorschlag liefert der Server-Mod `bonegraderexport`
 (Repo bab-perf): Er schreibt bei jedem Serverstart
 `bonegrader/client-requirements.json` – pro Mod, ob Spieler ihn zum Beitreten
 brauchen und warum (Pflicht-Netzwerkkanäle, synchronisierte Registry-Einträge

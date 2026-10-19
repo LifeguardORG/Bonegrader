@@ -779,6 +779,18 @@ function renderPlan(view) {
     );
   }
 
+  if (view.health?.length) {
+    const name = (p) => local[p]?.name || prettyFile(baseName(p));
+    const lines = view.health.map((b) => {
+      const fix = b.fix.length ? ` – ${b.fix.map(name).join(", ")} ist bei dir deaktiviert` : "";
+      return h("p", {}, `${name(b.path)} braucht ${b.missing.join(", ")}${fix}.`);
+    });
+    planBody.append(
+      h("div", { class: "box err", role: "alert" }, h("h3", {}, "So startet Minecraft nicht"), lines,
+        h("p", {}, "Schalte die deaktivierten Mods wieder ein – oder die, die sie brauchen, ebenfalls aus."))
+    );
+  }
+
   const installs = plan.downloads.filter((d) => !d.replaces);
   const updates = plan.downloads.filter((d) => d.replaces);
   const removed = plan.removals.length + plan.duplicates.length + plan.staleDisabled.length;

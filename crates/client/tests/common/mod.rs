@@ -174,6 +174,8 @@ pub fn local(path: &str, content: &[u8], mod_ids: &[&str]) -> LocalFile {
         mod_ids: mod_ids.iter().map(|s| s.to_string()).collect(),
         mod_version: None,
         mod_name: None,
+        dependencies: vec![],
+        provides: vec![],
         disabled: false,
     }
 }

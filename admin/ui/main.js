@@ -507,6 +507,31 @@ function renderRequired(res) {
     if (warns.length) box.append(h("div", { class: "box warn" }, h("h3", {}, "Pack und Server weichen ab"), warns.map((w) => h("p", {}, w))));
   }
 
+  const needs = res.marking.needsOptional || [];
+  if (needs.length) {
+    const byPath = new Map(rows.map((r) => [r.path, r]));
+    const nameOf = (p) => byPath.get(p)?.name || baseName(p);
+    box.append(h("div", { class: "box warn" },
+      h("h3", {}, "Pflicht-Mods brauchen optional markierte Mods"),
+      needs.map((n) => h("p", {}, `${n.name || baseName(n.path)} braucht ${n.dependency} – ${n.providers.map(nameOf).join(" / ")} ist optional. ` +
+        "Wer das abschaltet, kann den Pflicht-Mod nicht mehr laden.")),
+      h("button", { class: "ghost small", type: "button", onclick: () => {
+        const channel = settings().channel;
+        const choices = choicesFor(channel);
+        for (const n of needs) {
+          const r = rows.find((x) => x.key === n.providerKeys[0]);
+          choices[n.providerKeys[0]] = true;
+          if (r) {
+            r.required = true;
+            r.source = "choice";
+          }
+        }
+        setChoices(channel, choices);
+        res.marking.needsOptional = [];
+        renderRequired(res);
+      } }, "Als Pflicht markieren")));
+  }
+
   const tools = h("div", { class: "tools" });
   if (rows.some(differs)) {
     tools.append(h("button", { class: "ghost small", type: "button", onclick: () => {

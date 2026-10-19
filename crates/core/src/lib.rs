@@ -10,6 +10,7 @@
 //! * [`modinfo`] — extracting a stable mod identity (`modId`) from a jar.
 //! * [`scan`] — reading the managed folders of a local instance.
 //! * [`diff`] — the pure, deterministic update planner (the heart of the app).
+//! * [`deps`] — which mods need which (switching mods on and off safely).
 //! * [`launcher`], [`paths`], [`version`] — shared helpers.
 //!
 //! The [`diff::compute_plan`] function only *plans* actions; applying them
@@ -17,6 +18,7 @@
 //! safety invariants documented on [`diff::UpdatePlan`].
 #![forbid(unsafe_code)]
 
+pub mod deps;
 pub mod diff;
 pub mod hash;
 pub mod launcher;

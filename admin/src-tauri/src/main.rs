@@ -148,6 +148,7 @@ impl Settings {
         };
         let marking = required::mark(
             &mut built.manifest,
+            &built.local,
             live,
             export.as_ref(),
             &self.required_choices,

@@ -240,6 +240,19 @@ fn print_plan(p: &Prepared) {
         );
     }
 
+    for b in &p.health {
+        let fix = if b.fix.is_empty() {
+            String::new()
+        } else {
+            format!(" – switched off: {}", b.fix.join(", "))
+        };
+        println!(
+            "WARNING: {} can't load, it needs {}{fix}",
+            b.path,
+            b.missing.join(", ")
+        );
+    }
+
     let plan = &p.plan;
     if p.is_noop() && plan.user_extras.is_empty() {
         println!("No changes.");

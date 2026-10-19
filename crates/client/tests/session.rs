@@ -483,3 +483,63 @@ fn undo_follows_a_mod_switched_after_the_update() {
     assert_eq!(tree(&i.join("mods")), vec!["jei-1.jar.disabled"]);
     assert_eq!(read(i.join("mods/jei-1.jar.disabled")), v1);
 }
+
+/// A zip with the given entries.
+fn zip_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in entries {
+        z.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        z.write_all(bytes).unwrap();
+    }
+    z.finish().unwrap().into_inner()
+}
+
+fn mods_toml(toml: &str) -> (&'static str, Vec<u8>) {
+    ("META-INF/neoforge.mods.toml", toml.as_bytes().to_vec())
+}
+
+#[test]
+fn the_plan_reports_mods_that_lack_a_switched_off_dependency() {
+    let inst = instance();
+    let i = inst.path();
+    // Kotlin for Forge comes as an "all" jar that only bundles the mod.
+    let inner = zip_of(&[mods_toml("[[mods]]\nmodId=\"kotlinforforge\"\n")]);
+    let kff = zip_of(&[("META-INF/jarjar/kff.jar", inner)]);
+    write(&i.join("mods/kff-all.jar.disabled"), &kff);
+    write(
+        &i.join("mods/k-mod.jar"),
+        &zip_of(&[mods_toml(
+            "[[mods]]\nmodId=\"kmod\"\ndisplayName=\"K Mod\"\n\
+             [[dependencies.kmod]]\nmodId=\"kotlinforforge\"\n\
+             [[dependencies.kmod]]\nmodId=\"neoforge\"\n",
+        )]),
+    );
+    let server = MockServer::new();
+    server.publish(&manifest(vec![]), None);
+
+    let p = updater(i, &server, &[]).prepare().unwrap();
+    assert_eq!(p.health.len(), 1, "{:?}", p.health);
+    assert_eq!(p.health[0].path, "mods/k-mod.jar");
+    assert_eq!(p.health[0].missing, vec!["kotlinforforge".to_string()]);
+    assert_eq!(
+        p.health[0].fix,
+        vec!["mods/kff-all.jar.disabled".to_string()]
+    );
+    let json = serde_json::to_value(p.view()).unwrap();
+    assert_eq!(json["health"][0]["fix"][0], "mods/kff-all.jar.disabled");
+    assert_eq!(json["local"]["mods/k-mod.jar"]["name"], "K Mod");
+
+    // Switched back on: nothing to report.
+    std::fs::rename(
+        i.join("mods/kff-all.jar.disabled"),
+        i.join("mods/kff-all.jar"),
+    )
+    .unwrap();
+    assert!(updater(i, &server, &[])
+        .prepare()
+        .unwrap()
+        .health
+        .is_empty());
+}

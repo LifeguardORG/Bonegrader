@@ -10,6 +10,7 @@ use crate::exec::{finalize, Decisions};
 use crate::fetch::{is_not_found, resolve_url, Fetcher};
 use crate::servers;
 use anyhow::{Context, Result};
+use bonegrader_core::deps::{broken, Broken};
 use bonegrader_core::diff::{assess_instance, compute_plan, InstanceAssessment, UpdatePlan};
 use bonegrader_core::hash::sha1_bytes;
 use bonegrader_core::manifest::{
@@ -211,8 +212,11 @@ pub struct Prepared {
     pub assessment: InstanceAssessment,
     pub compat: ClientCompat,
     /// Mod name/version of the local files the plan replaces, removes or asks
-    /// about (only those with metadata).
+    /// about, and of those in `health` (only those with metadata).
     pub local: BTreeMap<String, LocalMeta>,
+    /// Switched-on mods that can't start because something they need is
+    /// switched off (the game would not start) — as the instance is now.
+    pub health: Vec<Broken>,
 }
 
 impl Prepared {
@@ -243,6 +247,7 @@ impl Prepared {
             assessment: &self.assessment,
             compat: &self.compat,
             local: &self.local,
+            health: &self.health,
             noop: self.is_noop(),
             download_bytes: self.download_bytes(),
         }
@@ -264,6 +269,7 @@ pub struct PlanView<'a> {
     pub assessment: &'a InstanceAssessment,
     pub compat: &'a ClientCompat,
     pub local: &'a BTreeMap<String, LocalMeta>,
+    pub health: &'a [Broken],
     pub noop: bool,
     pub download_bytes: u64,
 }
@@ -319,7 +325,8 @@ impl Updater<'_> {
         let server = pending_server(self.instance, m, &state);
         let assessment = assess_instance(m, &local, &state);
         let compat = client_compat(m.client.as_ref(), CLIENT_VERSION);
-        let local = local_meta(&plan, &local);
+        let health = broken(&local);
+        let local = local_meta(&plan, &health, &local);
         Ok(Prepared {
             fetched,
             state,
@@ -329,6 +336,7 @@ impl Updater<'_> {
             assessment,
             compat,
             local,
+            health,
         })
     }
 
@@ -407,8 +415,12 @@ impl Updater<'_> {
     }
 }
 
-/// Names and versions of the local files `plan` refers to.
-fn local_meta(plan: &UpdatePlan, local: &[LocalFile]) -> BTreeMap<String, LocalMeta> {
+/// Names and versions of the local files `plan` and `health` refer to.
+fn local_meta(
+    plan: &UpdatePlan,
+    health: &[Broken],
+    local: &[LocalFile],
+) -> BTreeMap<String, LocalMeta> {
     let by_path: BTreeMap<&str, &LocalFile> = local.iter().map(|l| (l.path.as_str(), l)).collect();
     let referenced = plan
         .downloads
@@ -420,7 +432,13 @@ fn local_meta(plan: &UpdatePlan, local: &[LocalFile]) -> BTreeMap<String, LocalM
         .chain(plan.user_extras.iter().map(String::as_str))
         .chain(plan.collisions.iter().map(|c| c.local_path.as_str()))
         // The pack's copy in a collision, when it is installed already.
-        .chain(plan.collisions.iter().map(|c| c.manifest_path.as_str()));
+        .chain(plan.collisions.iter().map(|c| c.manifest_path.as_str()))
+        .chain(
+            health
+                .iter()
+                .flat_map(|b| std::iter::once(&b.path).chain(&b.fix))
+                .map(String::as_str),
+        );
     let mut out = BTreeMap::new();
     for path in referenced {
         let Some(lf) = by_path.get(path) else {

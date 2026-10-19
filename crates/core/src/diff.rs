@@ -459,6 +459,8 @@ mod tests {
             mod_ids: mod_ids.iter().map(|s| s.to_string()).collect(),
             mod_version: None,
             mod_name: None,
+            dependencies: vec![],
+            provides: vec![],
             disabled: false,
         }
     }
@@ -1175,6 +1177,8 @@ mod tests {
                                 mod_ids: ids,
                                 mod_version: None,
                                 mod_name: None,
+                                dependencies: vec![],
+                                provides: vec![],
                                 disabled,
                             }
                         })
@@ -1237,6 +1241,8 @@ mod tests {
                         mod_ids: d.entry.mod_id.clone().into_iter().collect(),
                         mod_version: None,
                         mod_name: None,
+                        dependencies: vec![],
+                        provides: vec![],
                         disabled: d.disabled,
                     },
                 );

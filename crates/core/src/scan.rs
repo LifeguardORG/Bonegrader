@@ -9,7 +9,7 @@
 
 use crate::hash::sha1_file;
 use crate::manifest::Category;
-use crate::modinfo::read_mod_info;
+use crate::modinfo::{read_mod_info, ModInfo};
 use crate::paths::{category_dir, enabled_path, DISABLED_SUFFIX};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,6 +31,10 @@ pub struct LocalFile {
     pub mod_version: Option<String>,
     /// The primary mod's display name, if the jar declares one.
     pub mod_name: Option<String>,
+    /// modIds the jar needs to load on a client (see [`ModInfo::dependencies`]).
+    pub dependencies: Vec<String>,
+    /// modIds bundled as jar-in-jar (see [`ModInfo::provides`]).
+    pub provides: Vec<String>,
     /// Switched off with the launchers' `.disabled` suffix; `path` is then the
     /// real name (`mods/x.jar.disabled`), see [`LocalFile::enabled_path`].
     pub disabled: bool,
@@ -53,9 +57,9 @@ pub enum DisabledMods {
     Include,
 }
 
-/// Bumped whenever [`CachedFile`] gains data older entries lack, so they are
-/// re-read once instead of being served incomplete.
-const CACHE_VERSION: u32 = 2;
+/// Bumped whenever [`CachedFile`] gains mod metadata older entries lack: the
+/// metadata of their files is read again once (cheap), their hashes are kept.
+const CACHE_VERSION: u32 = 3;
 
 /// Hashes and mod metadata of previously scanned files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +92,22 @@ pub struct CachedFile {
     pub mod_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mod_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<String>,
+}
+
+impl CachedFile {
+    fn info(&self) -> ModInfo {
+        ModInfo {
+            mod_ids: self.mod_ids.clone(),
+            version: self.mod_version.clone(),
+            display_name: self.mod_name.clone(),
+            dependencies: self.dependencies.clone(),
+            provides: self.provides.clone(),
+        }
+    }
 }
 
 /// Scan the given categories under `instance_dir` without a cache. Mods
@@ -115,9 +135,9 @@ pub fn scan_instance_cached(
     disabled_mods: DisabledMods,
     cache: &mut ScanCache,
 ) -> io::Result<Vec<LocalFile>> {
-    if cache.version != CACHE_VERSION {
-        *cache = ScanCache::default();
-    }
+    // An older cache still knows the hashes; only the mod metadata is read again.
+    let stale_metadata = cache.version != CACHE_VERSION;
+    cache.version = CACHE_VERSION;
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for &cat in categories {
@@ -145,17 +165,20 @@ pub fn scan_instance_cached(
                 .as_ref()
                 .and_then(|fp| cache.entries.get(&rel).filter(|c| &c.fingerprint == fp))
                 .cloned();
-            let (sha1, mod_ids, mod_version, mod_name) = match hit {
-                Some(c) => (c.sha1, c.mod_ids, c.mod_version, c.mod_name),
-                None => {
-                    let sha1 = sha1_file(&p).map_err(|e| with_path(e, &p))?;
-                    let info = if cat == Category::Mod {
-                        read_mod_info(&p).unwrap_or_default()
-                    } else {
-                        Default::default()
-                    };
-                    (sha1, info.mod_ids, info.version, info.display_name)
+            let read_info = || {
+                if cat == Category::Mod {
+                    read_mod_info(&p).unwrap_or_default()
+                } else {
+                    ModInfo::default()
                 }
+            };
+            let (sha1, info) = match hit {
+                Some(c) if !stale_metadata => {
+                    let info = c.info();
+                    (c.sha1, info)
+                }
+                Some(c) => (c.sha1, read_info()),
+                None => (sha1_file(&p).map_err(|e| with_path(e, &p))?, read_info()),
             };
             if let Some(fingerprint) = fp {
                 cache.entries.insert(
@@ -163,9 +186,11 @@ pub fn scan_instance_cached(
                     CachedFile {
                         fingerprint,
                         sha1: sha1.clone(),
-                        mod_ids: mod_ids.clone(),
-                        mod_version: mod_version.clone(),
-                        mod_name: mod_name.clone(),
+                        mod_ids: info.mod_ids.clone(),
+                        mod_version: info.version.clone(),
+                        mod_name: info.display_name.clone(),
+                        dependencies: info.dependencies.clone(),
+                        provides: info.provides.clone(),
                     },
                 );
             }
@@ -176,9 +201,11 @@ pub fn scan_instance_cached(
                 file_name,
                 size: meta.len(),
                 sha1,
-                mod_ids,
-                mod_version,
-                mod_name,
+                mod_ids: info.mod_ids,
+                mod_version: info.version,
+                mod_name: info.display_name,
+                dependencies: info.dependencies,
+                provides: info.provides,
                 disabled,
             });
         }
@@ -359,6 +386,8 @@ mod tests {
                 mod_ids: vec![],
                 mod_version: None,
                 mod_name: None,
+                dependencies: vec![],
+                provides: vec![],
             },
         );
         std::fs::remove_file(inst.join("mods/a.jar")).unwrap();
@@ -369,25 +398,39 @@ mod tests {
     }
 
     #[test]
-    fn caches_from_an_older_format_are_read_again() {
+    fn older_caches_keep_their_hashes_but_read_metadata_again() {
         let inst = tmp("cache-version");
-        write(&inst.join("mods/a.jar"), b"AAAA");
+        let addon = jar(&[(
+            "META-INF/neoforge.mods.toml",
+            "[[mods]]\nmodId=\"addon\"\ndisplayName=\"Addon\"\n[[dependencies.addon]]\nmodId=\"create\"\n",
+        )]);
+        write(&inst.join("mods/a.jar"), &addon);
         let mut cache = ScanCache::default();
         scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut cache).unwrap();
-        cache.entries.get_mut("mods/a.jar").unwrap().sha1 = "stale".into();
 
-        // A cache written before display names existed has no version field.
+        // A cache from before dependencies (and display names) were kept:
+        // no version field, no metadata. Its hash is poisoned to show that
+        // it is still used — nothing is hashed again.
+        let entry = cache.entries.get_mut("mods/a.jar").unwrap();
+        entry.sha1 = "kept".into();
+        entry.mod_name = None;
+        entry.dependencies.clear();
         let mut json = serde_json::to_value(&cache).unwrap();
         json.as_object_mut().unwrap().remove("version");
         let mut old: ScanCache = serde_json::from_value(json).unwrap();
         assert_eq!(old.version, 0);
+
         let found = scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut old).unwrap();
+        assert_eq!(found[0].sha1, "kept", "hash from the cache");
         assert_eq!(
-            found[0].sha1,
-            sha1_bytes(b"AAAA"),
-            "re-read, not served stale"
+            found[0].mod_name.as_deref(),
+            Some("Addon"),
+            "metadata read again"
         );
+        assert_eq!(found[0].dependencies, vec!["create".to_string()]);
         assert_eq!(old.version, CACHE_VERSION);
+        let again = scan_instance_cached(&inst, &ALL, DisabledMods::Include, &mut old).unwrap();
+        assert_eq!(again, found, "served from the upgraded cache");
         let _ = std::fs::remove_dir_all(&inst);
     }
 

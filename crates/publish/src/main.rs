@@ -188,6 +188,7 @@ fn build(args: BuildArgs) -> Result<()> {
     choices.extend(args.optional.iter().map(|k| (k.clone(), false)));
     let marking = required::mark(
         &mut built.manifest,
+        &built.local,
         previous.as_ref(),
         export.as_ref(),
         &choices,
@@ -335,6 +336,26 @@ fn print_marking(m: &Marking) {
                 );
             }
         }
+    }
+    let as_dependency: Vec<String> = m
+        .rows
+        .iter()
+        .filter(|r| r.required && r.reasons.iter().any(|x| x.starts_with("gebraucht von")))
+        .map(|r| format!("{} ({})", r.path, r.reasons.join("; ")))
+        .collect();
+    if !as_dependency.is_empty() {
+        println!("Mandatory as a dependency of mandatory mods:");
+        for d in &as_dependency {
+            println!("  + {d}");
+        }
+    }
+    for n in &m.needs_optional {
+        println!(
+            "  ! {} needs {}, but {} is marked optional (--required to fix)",
+            n.path,
+            n.dependency,
+            n.providers.join(", ")
+        );
     }
     let Some(c) = &m.check else { return };
     if !c.complete {
