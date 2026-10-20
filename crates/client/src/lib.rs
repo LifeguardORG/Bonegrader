@@ -21,6 +21,7 @@ pub mod fetch;
 #[cfg(feature = "http")]
 pub mod http;
 pub mod install;
+pub mod mods;
 pub mod servers;
 pub mod session;
 

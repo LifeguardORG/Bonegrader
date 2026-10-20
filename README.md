@@ -32,12 +32,19 @@ kein Dateien-Verschieben mehr.
 - Eigene Mods bleiben erhalten (auf Wunsch einzeln oder alle entfernen); bei
   Konflikten mit dem Pack fragt Bonegrader nach. Sieht die Instanz nicht nach
   dem Pack aus (z. B. ein anderes Modpack), musst du das erst bestätigen.
-- Mods, die du im Launcher deaktiviert hast (CurseForge, Prism & Co. benennen
-  sie in `….jar.disabled` um), bleiben deaktiviert: Neue Versionen davon werden
-  gleich deaktiviert installiert, auch „rückgängig“ ändert daran nichts. Alte,
-  deaktivierte Reste von Pack-Mods räumt Bonegrader ins Backup. Braucht ein
-  eingeschalteter Mod einen deaktivierten (z. B. eine Bibliothek), warnt
-  Bonegrader beim Prüfen: So würde Minecraft nicht starten.
+- **Mods ein- und ausschalten:** Im Reiter **„Mods“** (Schritt 3) stehen alle
+  Mods der Instanz mit einem Schalter wie in CurseForge, mit Suche und Filtern
+  (An, Aus, Pflicht, Eigene). **Pflicht**-Mods sind markiert – ohne sie lässt
+  dich der Server nicht beitreten (abschalten geht trotzdem); deine eigenen
+  Mods stehen als „eigen“ mit in der Liste. Brauchen andere Mods den, den du
+  ausschaltest, fragt Bonegrader, ob sie mit aus sollen; braucht ein Mod, den
+  du einschaltest, ausgeschaltete Mods, bietet es an, sie mit einzuschalten.
+- Ausgeschaltete Mods heißen `….jar.disabled` – dieselbe Konvention wie in
+  CurseForge, Prism & Co., dort umgeschaltete Mods erkennt Bonegrader also auch.
+  Sie bleiben aus: Neue Versionen werden gleich ausgeschaltet installiert, auch
+  „rückgängig“ ändert daran nichts. Alte, ausgeschaltete Reste von Pack-Mods
+  räumt Bonegrader ins Backup. Braucht ein eingeschalteter Mod einen
+  ausgeschalteten, warnt Bonegrader: So würde Minecraft nicht starten.
 - Ersetzte/entfernte Dateien landen in `.bonegrader-backup/` („Backup-Ordner
   öffnen“); **„Update vom … rückgängig“** stellt den vorherigen Stand wieder her.
 - Fehlt NeoForge (offizieller Launcher), richtet Bonegrader es auf Knopfdruck
@@ -180,7 +187,7 @@ Lokal bauen (nur das eigene OS): `cargo tauri build`.
 
 ```
 crates/core      # Manifest, Hashing, Signaturen, jar-modId-Parser, Diff-Engine
-crates/client    # Pipeline (session), Downloads, transaktionales Apply + Undo,
+crates/client    # Pipeline (session), Downloads, transaktionales Apply + Undo, Mod-Schalter,
                  # Instanz-Erkennung, NeoForge-Installer, servers.dat
 crates/publish   # Publisher: Instanz -> geprüftes Manifest + Content-Store, Signieren,
                  # Upload, Verlauf/Rollback (remote)

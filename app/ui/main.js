@@ -321,6 +321,7 @@ function refreshButtons() {
   cancelBtn.classList.toggle("hidden", !running);
   undoBtn.disabled = busy;
   if (running) undoBtn.classList.add("hidden");
+  el("tabMods").disabled = running || !selected;
 }
 
 function renderStepper() {
@@ -350,6 +351,7 @@ function goStep(n, { grow = false, focus = true } = {}) {
 /** A changed URL or instance invalidates the reviewed plan. */
 function invalidatePlan(toStep) {
   lastPlan = null;
+  modList = null;
   maxStep = Math.min(maxStep, toStep);
   renderStepper();
   refreshButtons();
@@ -1108,6 +1110,7 @@ async function doCheck({ keepResult = false, quiet = false } = {}) {
     rememberInstance(selected);
     showCompat(view.compat);
     renderPlan(view);
+    if (stepTab === "mods" && !modList) loadMods();
     await checkLoader(view);
   } catch (e) {
     const r = asReport(e);
@@ -1125,6 +1128,7 @@ async function doCheck({ keepResult = false, quiet = false } = {}) {
 
 async function doApply() {
   if (!invoke || !lastPlan) return;
+  setTab("changes");
   clearNotice();
   hideResult();
   busy = true;
@@ -1283,7 +1287,252 @@ function onCloseRequested() {
 
 // --- startup ----------------------------------------------------------------------
 
+// --- mods tab ---------------------------------------------------------------------------
+// Every jar in mods/ with a CurseForge-style switch. Switching renames
+// x.jar <-> x.jar.disabled (the launchers' convention; updates keep it). Before
+// switching, the app asks what the other mods would say: what stops loading
+// when a mod goes off, what a mod needs switched on with it.
+
+const planCard = el("planCard");
+const modsBody = el("modsBody");
+const modDialog = el("modDialog");
+let stepTab = "changes";
+let modList = null; // { mods, health, online } of the selected instance
+let modFilter = "all";
+let modQuery = "";
+
+const FILTERS = [["all", "Alle"], ["on", "An"], ["off", "Aus"], ["required", "Pflicht"], ["own", "Eigene"]];
+
+function setTab(tab) {
+  stepTab = tab;
+  planCard.classList.toggle("mods-view", tab === "mods");
+  for (const [id, name] of [["tabChanges", "changes"], ["tabMods", "mods"]]) {
+    el(id).classList.toggle("active", tab === name);
+    el(id).setAttribute("aria-selected", String(tab === name));
+  }
+  el("h-step3").textContent = tab === "mods" ? "Mods" : "Änderungen";
+  if (tab === "mods" && !modList) loadMods();
+}
+
+const modName = (path) => {
+  const row = modList?.mods.find((m) => m.path === path);
+  return row?.name || prettyFile(baseName(path));
+};
+
+async function loadMods() {
+  if (!invoke || !selected) return;
+  if (!modList) modsBody.replaceChildren(h("p", { class: "mods-empty" }, "Lese die Mods …"));
+  try {
+    modList = await invoke("list_mods", { instance: selected.path, baseUrl: baseUrlInput.value.trim() });
+    el("tabMods").textContent = `Mods (${modList.mods.length})`;
+    renderMods();
+  } catch (e) {
+    modsBody.replaceChildren();
+    showError(asReport(e), { retry: loadMods });
+  }
+}
+
+/** "A, B, C und 33 weitere" — long lists would push the mod list out of the window. */
+function nameList(paths, max = 6) {
+  const names = paths.map(modName);
+  return names.length > max ? `${names.slice(0, max).join(", ")} und ${names.length - max} weitere` : names.join(", ");
+}
+
+/** Switch `paths` on, together with the switched-off mods they need to load. */
+async function switchOn(paths) {
+  let needed = [];
+  try {
+    needed = (await invoke("check_mod_switch", { instance: selected.path, off: [], on: paths })).requirements;
+  } catch (e) {
+    return showError(asReport(e));
+  }
+  const all = [...new Set([...paths, ...needed])];
+  await switchMods(all.map((path) => ({ path, enabled: true })));
+}
+
+function modMatches(m) {
+  const q = modQuery.toLowerCase();
+  if (q && !`${m.name || ""} ${baseName(m.path)}`.toLowerCase().includes(q)) return false;
+  switch (modFilter) {
+    case "on": return m.enabled;
+    case "off": return !m.enabled;
+    case "required": return m.required === true;
+    case "own": return !m.pack;
+    default: return true;
+  }
+}
+
+function renderMods() {
+  if (!modList) return;
+  const keepScroll = el("modRows")?.scrollTop || 0; // stay where the player was
+  const mods = modList.mods;
+  const on = mods.filter((m) => m.enabled).length;
+  const requiredOff = mods.filter((m) => m.required === true && !m.enabled);
+  // Manifests published before the marking know no Pflicht mods at all.
+  const marked = mods.some((m) => m.required != null);
+  if (!marked && modFilter === "required") modFilter = "all";
+
+  const search = h("input", { type: "search", placeholder: "Mods durchsuchen …", "aria-label": "Mods durchsuchen", value: modQuery });
+  search.addEventListener("input", () => {
+    modQuery = search.value;
+    renderModRows();
+  });
+  const filters = FILTERS.map(([key, label]) =>
+    h("button", { class: "filter" + (modFilter === key ? " active" : ""), type: "button", "aria-pressed": String(modFilter === key),
+      disabled: key === "required" && !marked,
+      title: key === "required" && !marked ? "Der Server-Stand enthält noch keine Pflicht-Markierung." : null,
+      onclick: () => {
+        modFilter = key;
+        renderMods();
+      } }, label));
+
+  const boxes = [];
+  if (modList.health.length) {
+    const fixes = [...new Set(modList.health.flatMap((b) => b.fix))];
+    const shown = modList.health.slice(0, 3);
+    const more = modList.health.length - shown.length;
+    boxes.push(h("div", { class: "box err", role: "alert" },
+      h("h3", {}, "So startet Minecraft nicht"),
+      shown.map((b) => h("p", {}, `${modName(b.path)} braucht ${b.missing.join(", ")}` +
+        (b.fix.length ? ` – ${nameList(b.fix, 3)} ist aus.` : "."))),
+      more ? h("p", {}, `… und ${count(more, "weiterer Mod", "weitere Mods")}.`) : null,
+      fixes.length ? h("div", { class: "actions" }, h("button", { class: "small", type: "button", onclick: () => switchOn(fixes) },
+        fixes.length === 1 ? `${modName(fixes[0])} einschalten` : "Fehlende Mods einschalten")) : null));
+  }
+  if (requiredOff.length) {
+    const paths = requiredOff.map((m) => m.path);
+    boxes.push(h("div", { class: "box warn" },
+      h("h3", {}, count(requiredOff.length, "Pflicht-Mod ist aus", "Pflicht-Mods sind aus")),
+      h("p", {}, `${nameList(paths)} – damit lässt dich der Server nicht beitreten.`),
+      h("div", { class: "actions" }, h("button", { class: "small", type: "button", onclick: () => switchOn(paths) },
+        paths.length === 1 ? `${modName(paths[0])} einschalten` : "Alle Pflicht-Mods einschalten"))));
+  }
+
+  modsBody.replaceChildren(
+    ...boxes,
+    h("div", { class: "summary-row" },
+      h("span", { class: "chip" }, `${count(mods.length, "Mod", "Mods")} · ${on} an · ${mods.length - on} aus`),
+      !modList.online
+        ? h("span", { class: "chip", title: "Ohne Verbindung zum Update-Server fehlt die Pflicht-Markierung." }, "offline – ohne Pflicht-Markierung")
+        : !marked
+          ? h("span", { class: "chip", title: "Sie kommt mit dem nächsten Veröffentlichen aus der Admin-App." }, "Server-Stand ohne Pflicht-Markierung")
+          : null),
+    h("div", { class: "mods-tools" }, search, ...filters),
+    h("div", { id: "modRows" })
+  );
+  renderModRows();
+  el("modRows").scrollTop = keepScroll;
+}
+
+function renderModRows() {
+  const box = el("modRows");
+  if (!box) return;
+  const rows = modList.mods.filter(modMatches).map((m) => {
+    const input = h("input", { type: "checkbox", role: "switch", "aria-label": `${modName(m.path)} ${m.enabled ? "ausschalten" : "einschalten"}` });
+    input.checked = m.enabled;
+    input.disabled = busy;
+    input.addEventListener("change", () => toggleMod(m, input.checked, input));
+    const file = baseName(m.path);
+    return h("div", { class: "mod-row" + (m.enabled ? "" : " off") },
+      h("label", { class: "switch" }, input, h("span", { class: "slider" })),
+      h("div", { class: "what" },
+        h("div", {}, h("span", { class: "title" }, m.name || prettyFile(file)), m.version ? h("span", { class: "ver" }, m.version) : null),
+        h("div", { class: "file" }, file)),
+      m.required === true ? h("span", { class: "tag req", title: "Ohne diesen Mod lässt dich der Server nicht beitreten." }, "Pflicht") : null,
+      m.pack ? null : h("span", { class: "tag own", title: "Gehört nicht zum Pack – dein eigener Mod." }, "eigen"));
+  });
+  box.replaceChildren(...(rows.length ? rows : [h("p", { class: "mods-empty" }, "Keine passenden Mods.")]));
+}
+
+/** A small choice dialog; resolves with the chosen key ("cancel" on Escape). */
+function askMods({ title, text, items, choices }) {
+  return new Promise((resolve) => {
+    el("modDialogTitle").textContent = title;
+    el("modDialogText").textContent = text;
+    el("modDialogList").replaceChildren(...items.map((t) => h("li", {}, t)));
+    const done = (key) => {
+      modDialog.classList.add("hidden");
+      modDialog.removeEventListener("keydown", onKey);
+      resolve(key);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") done("cancel");
+    };
+    modDialog.addEventListener("keydown", onKey);
+    el("modDialogActions").replaceChildren(...choices.map(([key, label, cls]) =>
+      h("button", { class: cls || "ghost", type: "button", onclick: () => done(key) }, label)));
+    modDialog.classList.remove("hidden");
+    el("modDialogActions").lastElementChild?.focus();
+  });
+}
+
+async function toggleMod(m, wantOn, input) {
+  const instance = selected.path;
+  const name = modName(m.path);
+  const switches = [{ path: m.path, enabled: wantOn }];
+  try {
+    const check = await invoke("check_mod_switch", { instance, off: wantOn ? [] : [m.path], on: wantOn ? [m.path] : [] });
+    if (!wantOn && check.dependents.length) {
+      const choice = await askMods({
+        title: `${name} ausschalten?`,
+        text: "Diese Mods brauchen ihn und würden dann nicht mehr laden – Minecraft startet so nicht:",
+        items: check.dependents.map((d) => `${modName(d.path)} (braucht ${d.missing.join(", ")})`),
+        choices: [["cancel", "Abbrechen"], ["only", `Nur ${name}`], ["all", "Alle ausschalten", "primary"]],
+      });
+      if (choice === "cancel") return renderModRows();
+      if (choice === "all") switches.push(...check.dependents.map((d) => ({ path: d.path, enabled: false })));
+    }
+    if (wantOn && check.requirements.length) {
+      const choice = await askMods({
+        title: `${name} braucht weitere Mods`,
+        text: "Diese Mods sind aus, ohne sie lädt er nicht:",
+        items: check.requirements.map(modName),
+        choices: [["cancel", "Abbrechen"], ["only", `Nur ${name}`], ["with", "Mit einschalten", "primary"]],
+      });
+      if (choice === "cancel") return renderModRows();
+      if (choice === "with") switches.push(...check.requirements.map((path) => ({ path, enabled: true })));
+    }
+  } catch (e) {
+    if (input) input.checked = m.enabled;
+    return showError(asReport(e));
+  }
+  await switchMods(switches);
+}
+
+async function switchMods(switches) {
+  if (busy) return;
+  busy = true;
+  refreshButtons();
+  renderModRows();
+  let done = "";
+  try {
+    await invoke("switch_mods", { instance: selected.path, switches });
+    const off = switches.filter((s) => !s.enabled).length;
+    const parts = [];
+    if (off) parts.push(`${count(off, "Mod", "Mods")} ausgeschaltet`);
+    if (switches.length - off) parts.push(`${count(switches.length - off, "Mod", "Mods")} eingeschaltet`);
+    done = parts.join(", ") + ".";
+    setStatus(done, "ok");
+  } catch (e) {
+    showError(asReport(e));
+  } finally {
+    busy = false;
+    refreshButtons();
+  }
+  await loadMods();
+  // The update view follows: switched-off mods stay off, but the plan changes.
+  // (The check clears the status line, so the result is shown again after it.)
+  if (!work) {
+    doCheck({ quiet: true, keepResult: true }).then(() => {
+      renderModRows();
+      if (done) setStatus(done, "ok");
+    });
+  }
+}
+
 function wire() {
+  el("tabChanges").addEventListener("click", () => setTab("changes"));
+  el("tabMods").addEventListener("click", () => setTab("mods"));
   baseUrlInput.addEventListener("input", () => {
     serverInfo = null;
     renderServer();

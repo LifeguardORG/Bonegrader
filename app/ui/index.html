@@ -116,9 +116,16 @@
 
         <!-- Step 3: plan, progress, result -->
         <section id="planCard" class="panel card" data-step="3" aria-labelledby="h-step3">
-          <h2 id="h-step3" tabindex="-1">Änderungen</h2>
+          <div class="step-head">
+            <h2 id="h-step3" tabindex="-1">Änderungen</h2>
+            <div class="tabs" role="tablist" aria-label="Ansicht">
+              <button id="tabChanges" class="tab active" role="tab" aria-selected="true" aria-controls="planBody" type="button">Update</button>
+              <button id="tabMods" class="tab" role="tab" aria-selected="false" aria-controls="modsBody" type="button">Mods</button>
+            </div>
+          </div>
           <div id="result" class="result hidden" role="status"></div>
-          <div id="planBody" class="panel-body"></div>
+          <div id="planBody" class="panel-body" role="tabpanel"></div>
+          <div id="modsBody" class="panel-body" role="tabpanel"></div>
           <div id="progress" class="progress hidden">
             <div class="progress-head">
               <span id="progressTitle" class="progress-title">Lade Dateien …</span>
@@ -151,6 +158,16 @@
           <button id="closeStay" class="ghost" type="button">Weiterlaufen lassen</button>
           <button id="closeCancel" class="danger-solid" type="button">Abbrechen und schließen</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Asked before switching a mod others need (or one that needs others) -->
+    <div id="modDialog" class="overlay hidden">
+      <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="modDialogTitle" aria-describedby="modDialogText">
+        <h3 id="modDialogTitle"></h3>
+        <p id="modDialogText" class="muted"></p>
+        <ul id="modDialogList" class="dialog-list"></ul>
+        <div id="modDialogActions" class="actions"></div>
       </div>
     </div>
 

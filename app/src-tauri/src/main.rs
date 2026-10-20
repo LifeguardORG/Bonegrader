@@ -27,6 +27,7 @@ use bonegrader_client::exec::Decisions;
 use bonegrader_client::fetch::check_url;
 use bonegrader_client::http::HttpFetcher;
 use bonegrader_client::install;
+use bonegrader_client::mods::{self, ModList, Switch, SwitchCheck};
 use bonegrader_client::session::{
     client_compat, fetch_manifest, now_rfc3339, restorable, timestamp, trusted_keys, undo_last,
     ClientCompat, FetchedManifest, Restorable, SignatureStatus, Updater, CLIENT_VERSION,
@@ -252,6 +253,59 @@ async fn apply_update(
         })
     })
     .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModsView {
+    #[serde(flatten)]
+    list: ModList,
+    /// The pack's manifest could be read (else no Pflicht marking).
+    online: bool,
+}
+
+/// Every mod of the instance, on and off, with the pack's marking (needs the
+/// channel; offline the list works without it).
+#[tauri::command]
+async fn list_mods(instance: String, base_url: String) -> Result<ModsView, Report> {
+    blocking(move || {
+        let manifest = fetch(&base_url).ok().map(|f| f.manifest);
+        let list = mods::list(&PathBuf::from(&instance), manifest.as_ref())?;
+        Ok(ModsView {
+            list,
+            online: manifest.is_some(),
+        })
+    })
+    .await
+}
+
+/// What switching `off`/`on` would mean for the other mods (asked first).
+#[tauri::command]
+async fn check_mod_switch(
+    instance: String,
+    off: Vec<String>,
+    on: Vec<String>,
+) -> Result<SwitchCheck, Report> {
+    blocking(move || mods::check_switch(&PathBuf::from(&instance), &off, &on)).await
+}
+
+/// Switch mods on or off (all or nothing) — never while an update runs.
+#[tauri::command]
+async fn switch_mods(
+    state: State<'_, AppState>,
+    instance: String,
+    switches: Vec<Switch>,
+) -> Result<Vec<String>, Report> {
+    if state.busy.load(Ordering::SeqCst) {
+        let message = "Während ein Update läuft, lassen sich keine Mods umschalten.".to_string();
+        return Err(Report {
+            kind: Kind::Other,
+            detail: message.clone(),
+            message,
+        });
+    }
+    let _busy = BusyGuard::new(&state);
+    blocking(move || mods::switch(&PathBuf::from(&instance), &switches)).await
 }
 
 #[derive(Serialize)]
@@ -624,7 +678,10 @@ fn main() {
             loader_status,
             install_loader,
             check_app_update,
-            install_app_update
+            install_app_update,
+            list_mods,
+            check_mod_switch,
+            switch_mods
         ])
         .build(context)
         .expect("error while building Bonegrader")

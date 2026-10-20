@@ -525,14 +525,14 @@ pub fn save_state(instance: &Path, state: &ClientState) -> Result<()> {
 }
 
 /// The scan cache is an optimisation only: unreadable means empty.
-fn load_cache(instance: &Path) -> ScanCache {
+pub(crate) fn load_cache(instance: &Path) -> ScanCache {
     std::fs::read(instance.join(CACHE_FILE))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
-fn save_cache(instance: &Path, cache: &ScanCache) {
+pub(crate) fn save_cache(instance: &Path, cache: &ScanCache) {
     let tmp = instance.join(format!("{CACHE_FILE}.tmp"));
     if let Ok(bytes) = serde_json::to_vec(cache) {
         if std::fs::write(&tmp, bytes).is_ok() {

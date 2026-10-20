@@ -694,7 +694,7 @@ fn preflight(instance: &Path, exec: &ExecutionPlan) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn ensure_movable(p: &Path) -> Result<()> {
+pub(crate) fn ensure_movable(p: &Path) -> Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_LOCK_VIOLATION: i32 = 33;
@@ -719,7 +719,7 @@ fn ensure_movable(p: &Path) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn ensure_movable(_p: &Path) -> Result<()> {
+pub(crate) fn ensure_movable(_p: &Path) -> Result<()> {
     // Unix renames work on open files; the journal covers real failures.
     Ok(())
 }
@@ -900,7 +900,7 @@ impl Journal {
 
 /// Rename, retrying briefly on Windows where virus scanners and indexers hold
 /// fresh files for a moment; falls back to copy + delete across filesystems.
-fn move_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn move_with_retry(from: &Path, to: &Path) -> io::Result<()> {
     let attempts = if cfg!(windows) { 8 } else { 1 };
     let mut delay = Duration::from_millis(50);
     let mut attempt = 1;
