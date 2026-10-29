@@ -47,8 +47,11 @@ kein Dateien-Verschieben mehr.
   ausgeschalteten, warnt Bonegrader: So würde Minecraft nicht starten.
 - Ersetzte/entfernte Dateien landen in `.bonegrader-backup/` („Backup-Ordner
   öffnen“); **„Update vom … rückgängig“** stellt den vorherigen Stand wieder her.
-- Fehlt NeoForge (offizieller Launcher), richtet Bonegrader es auf Knopfdruck
-  ein; der Server wird einmalig in die Mehrspieler-Liste eingetragen.
+- Fehlt NeoForge oder ist es die falsche Version, richtet Bonegrader es auf
+  Knopfdruck ein: im offiziellen Launcher per NeoForge-Installer, in Prism
+  stellt es die Version der Instanz um (Prism lädt NeoForge beim nächsten Start
+  selbst). In CurseForge & Co. zeigt es, welche Version einzustellen ist. Der
+  Server wird einmalig in die Mehrspieler-Liste eingetragen.
 - Fehler werden in Klartext erklärt („Keine Verbindung zum Update-Server“,
   „Minecraft läuft noch“ …), mit „Erneut versuchen“ und kopierbaren Details.
   Die App folgt dem hellen bzw. dunklen Design des Systems.

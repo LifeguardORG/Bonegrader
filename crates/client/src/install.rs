@@ -1,10 +1,14 @@
-//! Optional NeoForge client install for the vanilla (official launcher) path.
+//! Optional NeoForge client install for the vanilla (official launcher) path,
+//! and switching the NeoForge version of a Prism Launcher instance.
 //!
 //! Flags verified against `neoforge-21.1.234-installer.jar --help`:
 //!   `--install-client [dir]`  (dir defaults to ~/.minecraft)
 //! The installer downloads the required libraries and registers a launcher
 //! profile itself; on top of that we upsert a dedicated profile so the pack's
 //! mods live in their own game directory instead of the shared `.minecraft`.
+//!
+//! Prism needs no installer: its `mmc-pack.json` names the NeoForge version,
+//! and Prism downloads that version itself when the instance starts.
 
 use crate::fetch::{is_not_found, Fetcher};
 use anyhow::{bail, Context, Result};
@@ -341,6 +345,96 @@ pub fn ensure_client(
     Ok(ran_installer)
 }
 
+const PRISM_NEOFORGE: &str = "net.neoforged";
+/// Loader components a Prism instance may carry instead of NeoForge.
+const PRISM_OTHER_LOADERS: [&str; 3] = [
+    "net.minecraftforge",
+    "net.fabricmc.fabric-loader",
+    "org.quiltmc.quilt-loader",
+];
+
+/// Point a Prism `mmc-pack.json` at NeoForge `loader_version`, adding the
+/// component to an instance without a loader. `None` if it already uses that
+/// version. Prism re-reads the file at every launch (a running Prism is fine)
+/// and refreshes the `cached*` fields itself. Another Minecraft version or
+/// another loader is refused: that would rebuild the player's instance.
+pub fn set_prism_neoforge(
+    mmc_pack: &str,
+    loader_version: &str,
+    mc_version: &str,
+) -> Result<Option<String>> {
+    let mut pack: Value = serde_json::from_str(mmc_pack).context("parsing mmc-pack.json")?;
+    let components = pack
+        .get_mut("components")
+        .and_then(Value::as_array_mut)
+        .context("mmc-pack.json has no components")?;
+    fn uid(c: &Value) -> &str {
+        c.get("uid").and_then(Value::as_str).unwrap_or_default()
+    }
+    fn version(c: &Value) -> Option<&str> {
+        c.get("version").and_then(Value::as_str)
+    }
+
+    let mc = components
+        .iter()
+        .find(|c| uid(c) == "net.minecraft")
+        .and_then(version);
+    if mc != Some(mc_version) {
+        bail!(
+            "Die Prism-Instanz nutzt Minecraft {}, das Pack braucht {mc_version}",
+            mc.unwrap_or("?")
+        );
+    }
+    if let Some(other) = components
+        .iter()
+        .map(uid)
+        .find(|u| PRISM_OTHER_LOADERS.contains(u))
+    {
+        bail!("Die Prism-Instanz nutzt einen anderen Loader ({other}), das Pack braucht NeoForge");
+    }
+    match components.iter_mut().find(|c| uid(c) == PRISM_NEOFORGE) {
+        Some(c) if version(c) == Some(loader_version) => return Ok(None),
+        Some(c) => {
+            let c = c.as_object_mut().context("broken NeoForge component")?;
+            c.insert("version".into(), loader_version.into());
+            c.insert("cachedVersion".into(), loader_version.into());
+        }
+        None => {
+            components.push(serde_json::json!({ "uid": PRISM_NEOFORGE, "version": loader_version }))
+        }
+    }
+    // Prism's own layout (Qt: four spaces, final newline) keeps diffs small.
+    let mut out = Vec::new();
+    let fmt = serde_json::ser::PrettyFormatter::with_indent(b"    ");
+    serde::Serialize::serialize(
+        &pack,
+        &mut serde_json::Serializer::with_formatter(&mut out, fmt),
+    )?;
+    out.push(b'\n');
+    Ok(Some(String::from_utf8(out)?))
+}
+
+/// Switch the Prism instance in `instance_dir` to NeoForge `loader_version`
+/// (see [`set_prism_neoforge`]). Returns `false` if it already used it.
+pub fn switch_prism_loader(
+    instance_dir: &Path,
+    loader_version: &str,
+    mc_version: &str,
+) -> Result<bool> {
+    if !is_valid_loader_version(loader_version) {
+        bail!("ungültige NeoForge-Version im Manifest: {loader_version}");
+    }
+    let path = instance_dir.join("mmc-pack.json");
+    let text = std::fs::read_to_string(&path).context("reading mmc-pack.json")?;
+    let Some(updated) = set_prism_neoforge(&text, loader_version, mc_version)? else {
+        return Ok(false);
+    };
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, updated).context("writing mmc-pack.json")?;
+    std::fs::rename(&tmp, &path).context("swapping mmc-pack.json")?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +506,74 @@ mod tests {
         std::fs::create_dir_all(&vdir).unwrap();
         std::fs::write(vdir.join("neoforge-21.1.234.json"), "{}").unwrap();
         assert!(is_installed(&dir, "21.1.234"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const PRISM_PACK: &str = r#"{
+        "components": [
+            { "uid": "org.lwjgl3", "version": "3.3.3", "dependencyOnly": true },
+            { "uid": "net.minecraft", "version": "1.21.1", "important": true },
+            { "uid": "net.neoforged", "version": "21.1.234", "cachedVersion": "21.1.234",
+              "cachedRequires": [{ "equals": "1.21.1", "uid": "net.minecraft" }] }
+        ],
+        "formatVersion": 1
+    }"#;
+
+    #[test]
+    fn prism_switches_the_neoforge_version() {
+        let out = set_prism_neoforge(PRISM_PACK, "21.1.248", "1.21.1")
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let c = v["components"].as_array().unwrap();
+        assert_eq!(c.len(), 3, "no component added or lost");
+        assert_eq!(c[2]["version"], "21.1.248");
+        assert_eq!(c[2]["cachedVersion"], "21.1.248");
+        assert_eq!(c[1]["important"], true, "other components kept");
+        assert_eq!(v["formatVersion"], 1);
+
+        assert_eq!(
+            set_prism_neoforge(&out, "21.1.248", "1.21.1").unwrap(),
+            None,
+            "already right"
+        );
+    }
+
+    #[test]
+    fn prism_adds_neoforge_to_a_plain_instance() {
+        let plain =
+            r#"{"components":[{"uid":"net.minecraft","version":"1.21.1"}],"formatVersion":1}"#;
+        let out = set_prism_neoforge(plain, "21.1.248", "1.21.1")
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["components"][1]["uid"], "net.neoforged");
+        assert_eq!(v["components"][1]["version"], "21.1.248");
+    }
+
+    #[test]
+    fn prism_refuses_other_minecraft_or_loader() {
+        let err = set_prism_neoforge(PRISM_PACK, "21.1.248", "1.21.4").unwrap_err();
+        assert!(err.to_string().contains("Minecraft 1.21.1"), "{err}");
+        let fabric = r#"{"components":[
+            {"uid":"net.minecraft","version":"1.21.1"},
+            {"uid":"net.fabricmc.fabric-loader","version":"0.16.5"}]}"#;
+        assert!(set_prism_neoforge(fabric, "21.1.248", "1.21.1").is_err());
+        assert!(set_prism_neoforge("{}", "21.1.248", "1.21.1").is_err());
+    }
+
+    #[test]
+    fn prism_switch_writes_the_file() {
+        let dir = std::env::temp_dir().join(format!("bg-prism-nf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mmc-pack.json"), PRISM_PACK).unwrap();
+        assert!(switch_prism_loader(&dir, "21.1.248", "1.21.1").unwrap());
+        assert!(!switch_prism_loader(&dir, "21.1.248", "1.21.1").unwrap());
+        let text = std::fs::read_to_string(dir.join("mmc-pack.json")).unwrap();
+        assert!(text.contains("21.1.248") && !text.contains("21.1.234"));
+        assert!(!dir.join("mmc-pack.json.tmp").exists());
+        assert!(switch_prism_loader(&dir, "../x", "1.21.1").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

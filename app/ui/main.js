@@ -904,12 +904,14 @@ function renderUndo(restorable) {
 
 // Compare the selected instance's loader against the pack's required loader.
 // Runs for every launcher type: the vanilla + NeoForge path can be installed or
-// repaired from here; other launchers only get a short warning so the player
-// can fix the version in their own launcher.
+// repaired from here, a Prism instance gets its NeoForge version switched;
+// other launchers only get a short warning so the player can fix the version
+// in their own launcher.
 async function checkLoader(view) {
   let st;
   try {
     st = await invoke("loader_status", {
+      instance: selected.path,
       required: view.loader,
       launcher: selected.launcher || "Manual",
       loaderType: selected.loaderType || null,
@@ -926,6 +928,9 @@ async function checkLoader(view) {
       ? loaderName(st.installedType) + " " + (st.installedVersion || "?")
       : null;
   const box = h("div", { class: "box warn" });
+  const why = () => have && h("details", {}, h("summary", {}, "Warum?"),
+    h("p", {}, "Das Pack ist auf genau diese Version abgestimmt: Manche Mods setzen sie voraus – mit einer älteren startet Minecraft gar nicht, " +
+      "mit einer anderen kann der Server den Beitritt verweigern, auch wenn alle Mods stimmen."));
 
   if (st.canInstall) {
     const name = selected.name || "BonesAndBees";
@@ -936,15 +941,21 @@ async function checkLoader(view) {
         ? `Der Server braucht ${req} (MC ${st.mcVersion}). Bonegrader kann das für dich korrigieren.`
         : `Ohne Mod-Loader startet Minecraft ohne Mods. Bonegrader kann ${req} für dich einrichten.`),
       st.javaAvailable ? null : h("p", { class: "warn-line" }, "Kein Java gefunden – starte Minecraft einmal oder installiere Java, dann erneut prüfen."),
+      why(),
       h("details", {}, h("summary", {}, "Was passiert dabei?"),
-        h("p", {}, `Bonegrader lädt den offiziellen NeoForge-Installer und richtet das Profil „${name}“ ein. ` +
-          "Danach im offiziellen Launcher genau dieses Profil auswählen – sonst startet weiter Vanilla."))
+        h("p", {}, st.prism
+          ? `Bonegrader stellt die Prism-Instanz „${name}“ auf ${req} um, mehr nicht. ` +
+            "Prism lädt NeoForge beim nächsten Start der Instanz selbst herunter; Prism darf dabei offen bleiben."
+          : `Bonegrader lädt den offiziellen NeoForge-Installer und richtet das Profil „${name}“ ein. ` +
+            "Danach im offiziellen Launcher genau dieses Profil auswählen – sonst startet weiter Vanilla."))
     );
     const btn = h("button", { type: "button", class: "small" }, st.state === "mismatch" ? "NeoForge korrigieren" : "NeoForge einrichten");
     btn.disabled = !st.javaAvailable;
     btn.addEventListener("click", async () => {
       clearNotice();
-      setStatus(`Richte NeoForge ${st.requiredVersion} ein … (kann eine Minute dauern)`, "busy");
+      setStatus(st.prism
+        ? `Stelle NeoForge ${st.requiredVersion} ein …`
+        : `Richte NeoForge ${st.requiredVersion} ein … (kann eine Minute dauern)`, "busy");
       btn.disabled = true;
       work = "install";
       renderStepper();
@@ -955,7 +966,9 @@ async function checkLoader(view) {
           packName: name,
           profileKey: selected.profileKey || null,
         });
-        setStatus(`NeoForge ${st.requiredVersion} ist eingerichtet – im offiziellen Launcher das Profil „${name}“ starten.`, "ok");
+        setStatus(st.prism
+          ? `NeoForge ${st.requiredVersion} ist eingestellt – Prism lädt es beim nächsten Start von „${name}“.`
+          : `NeoForge ${st.requiredVersion} ist eingerichtet – im offiziellen Launcher das Profil „${name}“ starten.`, "ok");
         box.remove();
         await refreshInstances();
       } catch (e) {
@@ -975,8 +988,7 @@ async function checkLoader(view) {
       h("p", {}, have
         ? `Der Server braucht ${req} (MC ${st.mcVersion}) – bitte im Launcher genau diese Version einstellen.`
         : `Der Server braucht ${req} (MC ${st.mcVersion}). Bitte im Launcher prüfen, ob die Instanz genau diese Version nutzt.`),
-      h("details", {}, h("summary", {}, "Warum?"),
-        h("p", {}, "Mit einer anderen Loader-Version lässt dich der Server nicht beitreten, auch wenn alle Mods stimmen."))
+      why()
     );
   }
   planBody.prepend(box);

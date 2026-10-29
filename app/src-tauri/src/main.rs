@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use bonegrader_client::apply::{ApplyOptions, Progress};
 use bonegrader_client::detect::{
-    default_dotminecraft, discover_all, DetectedInstance, LauncherKind,
+    default_dotminecraft, discover_all, prism_instance_dir, prism_instance_of, DetectedInstance,
+    LauncherKind,
 };
 use bonegrader_client::errors::{Kind, Report};
 use bonegrader_client::exec::Decisions;
@@ -405,10 +406,14 @@ async fn create_instance(pack_name: String) -> Result<DetectedInstance, Report> 
 struct LoaderStatus {
     /// `"ok" | "missing" | "mismatch" | "unmanaged" | "unknown"`.
     state: String,
-    /// Bonegrader can install/repair the loader itself (vanilla + NeoForge).
+    /// Bonegrader can install/repair the loader itself (NeoForge, for the
+    /// official launcher or a Prism instance).
     can_install: bool,
+    /// The instance is a Prism instance: a repair only switches its version.
+    prism: bool,
     /// Convenience for the frontend: show an install/repair affordance.
     needed: bool,
+    /// A Java runtime for the NeoForge installer (Prism needs none from us).
     java_available: bool,
     /// The required NeoForge version exists under `.minecraft/versions`
     /// (it may still not be the profile the player actually launches).
@@ -426,12 +431,14 @@ struct LoaderStatus {
 /// (`required`, from the plan the player is looking at).
 ///
 /// This runs for *every* launcher type, so a wrong or missing NeoForge version
-/// is reported instead of silently ignored — including for CurseForge, Prism
-/// and manually-picked instances. Bonegrader can only auto-install for the
-/// vanilla (official launcher) + NeoForge path; elsewhere it just flags the
-/// mismatch so the player can fix it in their launcher.
+/// is reported instead of silently ignored — including for CurseForge and
+/// manually-picked instances. Bonegrader repairs NeoForge for the official
+/// launcher (installer + profile) and for Prism instances on the pack's
+/// Minecraft version (it sets the version, Prism downloads it); elsewhere it
+/// just flags the mismatch so the player can fix it in their launcher.
 #[tauri::command]
 async fn loader_status(
+    instance: String,
     required: Loader,
     launcher: String,
     loader_type: Option<String>,
@@ -440,7 +447,18 @@ async fn loader_status(
     blocking(move || {
         let is_vanilla = launcher.eq_ignore_ascii_case("vanilla");
         let required_neoforge = required.loader_type.eq_ignore_ascii_case("neoforge");
-        let can_install = is_vanilla && required_neoforge;
+        // Read from disk: a hand-picked Prism folder counts too, and the state
+        // is fresh right after a switch.
+        let prism = prism_instance_of(Path::new(&instance));
+        let (loader_type, loader_version) = match &prism {
+            Some(p) => (p.loader_type.clone(), p.loader_version.clone()),
+            None => (loader_type, loader_version),
+        };
+        let prism_fixable = prism.as_ref().is_some_and(|p| {
+            p.mc_version.as_deref() == Some(required.mc_version.as_str())
+                && p.loader_type.as_deref().is_none_or(|t| t == "neoforge")
+        });
+        let can_install = required_neoforge && (is_vanilla || prism_fixable);
 
         let type_ok = loader_type
             .as_deref()
@@ -455,21 +473,23 @@ async fn loader_status(
         let on_disk = dotmc
             .as_deref()
             .is_some_and(|d| install::is_installed(d, &required.loader_version));
-        let java_available = dotmc
-            .as_deref()
-            .is_some_and(|d| install::find_java(d).is_some());
+        let java_available = prism.is_some()
+            || dotmc
+                .as_deref()
+                .is_some_and(|d| install::find_java(d).is_some());
 
         let state = if type_ok && version_ok {
             "ok"
         } else if loader_type.is_none() && loader_version.is_none() {
             // No loader recorded for the instance at all.
-            if is_vanilla {
+            if is_vanilla || can_install {
                 "missing"
             } else {
                 "unknown"
             }
         } else if !can_install {
-            // We can see the mismatch but can't fix it (CurseForge / non-NeoForge).
+            // We can see the mismatch but can't fix it (CurseForge, another
+            // loader or Minecraft version, non-NeoForge pack).
             "unmanaged"
         } else if type_ok {
             "mismatch" // right loader family, wrong version
@@ -482,6 +502,7 @@ async fn loader_status(
         Ok(LoaderStatus {
             state: state.into(),
             can_install,
+            prism: prism.is_some(),
             needed,
             java_available,
             on_disk,
@@ -499,6 +520,7 @@ async fn loader_status(
 /// the player selected an existing official-launcher profile, `profile_key`
 /// targets that profile so it is converted to NeoForge *in place* — instead of
 /// leaving their selected (vanilla) profile untouched and adding a duplicate.
+/// A Prism instance only gets its NeoForge version switched.
 #[tauri::command]
 async fn install_loader(
     state: State<'_, AppState>,
@@ -509,9 +531,13 @@ async fn install_loader(
 ) -> Result<bool, Report> {
     let _busy = BusyGuard::new(&state);
     blocking(move || {
+        let loader = fetch(&base_url)?.manifest.loader;
+        if let Some(dir) = prism_instance_dir(Path::new(&game_dir)) {
+            return install::switch_prism_loader(dir, &loader.loader_version, &loader.mc_version);
+        }
+        let loader_version = loader.loader_version;
         let dotmc = default_dotminecraft()
             .ok_or_else(|| anyhow::anyhow!(".minecraft-Ordner nicht gefunden"))?;
-        let loader_version = fetch(&base_url)?.manifest.loader.loader_version;
         let key = profile_key
             .as_deref()
             .filter(|k| !k.is_empty())

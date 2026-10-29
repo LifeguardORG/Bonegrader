@@ -62,33 +62,52 @@ pub fn scan_prism_instances(root: &Path) -> Vec<DetectedInstance> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return out;
     };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        let Ok(cfg) = std::fs::read_to_string(dir.join("instance.cfg")) else {
-            continue;
-        };
-        let pack = std::fs::read_to_string(dir.join("mmc-pack.json")).ok();
-        let Some(p) = parse_prism_instance(&cfg, pack.as_deref()) else {
-            continue;
-        };
-        // The game directory is `.minecraft` or (newer instances) `minecraft`.
-        let game_dir = [".minecraft", "minecraft"]
-            .iter()
-            .map(|d| dir.join(d))
-            .find(|d| d.is_dir())
-            .unwrap_or_else(|| dir.join(".minecraft"));
-        out.push(DetectedInstance {
-            name: p.name,
-            path: game_dir,
-            launcher: LauncherKind::Prism,
-            mc_version: p.mc_version,
-            loader_type: p.loader_type,
-            loader_version: p.loader_version,
-            profile_key: None,
-        });
-    }
+    out.extend(
+        entries
+            .flatten()
+            .filter_map(|e| read_prism_instance(&e.path())),
+    );
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// The Prism instance in folder `dir` (the one with `instance.cfg`).
+fn read_prism_instance(dir: &Path) -> Option<DetectedInstance> {
+    let cfg = std::fs::read_to_string(dir.join("instance.cfg")).ok()?;
+    let pack = std::fs::read_to_string(dir.join("mmc-pack.json")).ok();
+    let p = parse_prism_instance(&cfg, pack.as_deref())?;
+    // The game directory is `.minecraft` or (newer instances) `minecraft`.
+    let game_dir = [".minecraft", "minecraft"]
+        .iter()
+        .map(|d| dir.join(d))
+        .find(|d| d.is_dir())
+        .unwrap_or_else(|| dir.join(".minecraft"));
+    Some(DetectedInstance {
+        name: p.name,
+        path: game_dir,
+        launcher: LauncherKind::Prism,
+        mc_version: p.mc_version,
+        loader_type: p.loader_type,
+        loader_version: p.loader_version,
+        profile_key: None,
+    })
+}
+
+/// The Prism instance folder a game directory belongs to: Prism keeps the game
+/// in `<instance>/minecraft` (older: `.minecraft`) next to `instance.cfg` and
+/// `mmc-pack.json`. Works for folders the player picked by hand, too.
+pub fn prism_instance_dir(game_dir: &Path) -> Option<&Path> {
+    let name = game_dir.file_name()?.to_str()?;
+    let dir = game_dir.parent()?;
+    (matches!(name, "minecraft" | ".minecraft")
+        && dir.join("instance.cfg").is_file()
+        && dir.join("mmc-pack.json").is_file())
+    .then_some(dir)
+}
+
+/// The Prism instance a game directory belongs to, read fresh from disk.
+pub fn prism_instance_of(game_dir: &Path) -> Option<DetectedInstance> {
+    prism_instance_dir(game_dir).and_then(read_prism_instance)
 }
 
 /// Scan a CurseForge Instances root for instance folders.
@@ -424,6 +443,28 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].launcher, LauncherKind::Prism);
         assert_eq!(found[0].path, dir.join("A/minecraft"));
+
+        assert_eq!(
+            prism_instance_dir(&dir.join("A/minecraft")),
+            None,
+            "no mmc-pack.json"
+        );
+        std::fs::write(
+            dir.join("A/mmc-pack.json"),
+            r#"{"components":[{"uid":"net.minecraft","version":"1.21.1"},{"uid":"net.neoforged","version":"21.1.234"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            prism_instance_dir(&dir.join("A/minecraft")),
+            Some(dir.join("A").as_path())
+        );
+        assert_eq!(
+            prism_instance_dir(&dir.join("A")),
+            None,
+            "only the game dir counts"
+        );
+        let inst = prism_instance_of(&dir.join("A/minecraft")).unwrap();
+        assert_eq!(inst.loader_version.as_deref(), Some("21.1.234"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
